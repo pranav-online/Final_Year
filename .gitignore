@@ -1,0 +1,49 @@
+# Environment and local configuration
+*.env
+**/.env
+backend/.env
+backend/mongodb.env.txt
+backend/data/local_users.json
+backend/data/local_market_listings.json
+
+# Python environment and build artifacts
+venv/
+.venv/
+.venv311/
+**/.venv/
+**/.venv311/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node dependencies and build artifacts
+node_modules/
+frontend/alip-frontend/node_modules/
+frontend/alip-frontend/build/
+frontend/alip-frontend/.cache/
+frontend/alip-vite/node_modules/
+
+# Large dataset archives and raw training data
+ml_models/*.zip
+ml_models/PlantDoc-Dataset-master/
+ml_models/PlantVillage-Dataset-master/
+ml_models/plantdoc_field/
+ml_models/dataset/
+*.h5
+*.pth
+*.pt
+*.onnx
+
+# Ignore nested git metadata from embedded repositories
+backend/.git
+frontend/alip-frontend/.git
+
+# Temporary scripts and reports
+check_size.py
+size_report.txt
+push_to_github.ps1
+
+# Local editor settings
+.vscode/

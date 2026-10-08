@@ -1,0 +1,129 @@
+{
+  "total_images": 15,
+  "labelled_images": 15,
+  "correct": 7,
+  "accuracy": 46.666666666666664,
+  "plantvillage_accuracy": 97.34,
+  "results": [
+    {
+      "filename": "corn_rust-1.jpg",
+      "expected": "Corn (maize) - Common rust",
+      "predicted": "Corn (maize) - Common rust ",
+      "confidence": 59.23,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "corn_rust-2.jpg",
+      "expected": "Corn (maize) - Common rust",
+      "predicted": "Corn (maize) - healthy",
+      "confidence": 94.42,
+      "correct": false,
+      "status": "healthy"
+    },
+    {
+      "filename": "corn_rust-3.jpg",
+      "expected": "Corn (maize) - Common rust",
+      "predicted": "Tomato - Late blight",
+      "confidence": 49.66,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "healthy_tomato-1.jpg",
+      "expected": "Tomato - healthy",
+      "predicted": "Tomato - Late blight",
+      "confidence": 97.0,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "healthy_tomato-2.jpg",
+      "expected": "Tomato - healthy",
+      "predicted": "Tomato - Late blight",
+      "confidence": 76.96,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "healthy_tomato-3.jpg",
+      "expected": "Tomato - healthy",
+      "predicted": "Tomato - Late blight",
+      "confidence": 74.31,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "potato_earlt_blight-1.jpg",
+      "expected": "Potato - Early blight",
+      "predicted": "Potato - Early blight",
+      "confidence": 74.72,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "potato_earlt_blight-3.jpg",
+      "expected": "Potato - Early blight",
+      "predicted": "Tomato - Late blight",
+      "confidence": 51.78,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "potato_early_blight-2.jpg",
+      "expected": "Potato - Early blight",
+      "predicted": "Tomato - Late blight",
+      "confidence": 91.31,
+      "correct": false,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomato_early_bright-1.jpg",
+      "expected": "Tomato - Early blight",
+      "predicted": "Tomato - Early blight",
+      "confidence": 93.55,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomato_early_bright-2.jpg",
+      "expected": "Tomato - Early blight",
+      "predicted": "Tomato - Early blight",
+      "confidence": 98.86,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomato_early_bright-3.jpg",
+      "expected": "Tomato - Early blight",
+      "predicted": "Tomato - Early blight",
+      "confidence": 51.04,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomato_late_blight-3.jpg",
+      "expected": "Tomato - Late blight",
+      "predicted": "Tomato - Late blight",
+      "confidence": 64.27,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomato_light_blight-2.jpg",
+      "expected": "Tomato - Late blight",
+      "predicted": "Tomato - Late blight",
+      "confidence": 99.99,
+      "correct": true,
+      "status": "diseased"
+    },
+    {
+      "filename": "tomto_late_blight-1.jpg",
+      "expected": "Tomato - Late blight",
+      "predicted": "Tomato - Early blight",
+      "confidence": 88.22,
+      "correct": false,
+      "status": "diseased"
+    }
+  ]
+}
