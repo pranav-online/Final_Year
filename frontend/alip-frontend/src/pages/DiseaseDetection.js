@@ -162,6 +162,27 @@ export default function DiseaseDetection() {
       const fd = new FormData(); fd.append('file', image);
       const res = await predictDisease(fd);
       setResult(res.data); setTab('overview');
+
+      // Save recent disease detection to localStorage for weather advisory integration
+      try {
+        const cName = res.data.raw_class?.split('___')[0]?.replace(/_/g, ' ')?.replace('(maize)', '(Maize)') || 'Crop';
+        const dName = res.data.raw_class?.split('___')[1]?.replace(/_/g, ' ') || 'Healthy';
+        const detectedObj = {
+          crop: cName,
+          disease: dName,
+          full_disease: res.data.disease || `${cName} - ${dName}`,
+          raw_class: res.data.raw_class,
+          severity: res.data.severity || 'medium',
+          confidence: res.data.confidence,
+          timestamp: new Date().toISOString(),
+          treatment: res.data.treatment,
+          status: res.data.status
+        };
+        localStorage.setItem('recent_disease_detection', JSON.stringify(detectedObj));
+      } catch (saveErr) {
+        console.warn('Could not cache recent disease detection:', saveErr);
+      }
+
       toast.success(res.data.ai_report_status === 'generated' ? 'Analysis and Gemini report complete' : 'Analysis complete; using treatment guidance fallback');
     } catch (err) {
       const message = err.response?.data?.detail || 'Disease analysis failed. Check the server and try again.';
@@ -299,7 +320,25 @@ export default function DiseaseDetection() {
               <p className="dd-sidebar-value" style={{ fontSize: 13 }}>{new Date().toLocaleString()}</p>
             </div>
 
-            <button className="dd-analyze-btn" style={{ marginTop: 'auto', fontSize: 13 }}
+            <button
+              className="dd-analyze-btn"
+              style={{
+                marginTop: 'auto',
+                fontSize: 13,
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                color: '#fff',
+                fontWeight: '600',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6
+              }}
+              onClick={() => nav('/weather', { state: { diseaseContext: result.disease || `${cropName} - ${diseaseName}`, severity: result.severity } })}
+            >
+              🌦️ 1-Week Weather Plan →
+            </button>
+
+            <button className="dd-analyze-btn" style={{ marginTop: 8, fontSize: 13, background: 'rgba(255,255,255,0.08)', color: '#94a3b8' }}
               onClick={() => { setResult(null); setImage(null); setPreview(null); }}>
               New Scan
             </button>

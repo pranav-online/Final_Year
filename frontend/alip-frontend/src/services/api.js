@@ -35,8 +35,12 @@ export const getDiseaseStatus = () =>
   api.get('/disease/status');
 
 // ─── Weather APIs ──────────────────────────────────────────
-export const getWeatherAdvisory = (location) =>
-  api.get(`/weather/advisory/${location}`);
+export const getWeatherAdvisory = (location, disease = null, severity = null) => {
+  const params = {};
+  if (disease) params.disease = disease;
+  if (severity) params.severity = severity;
+  return api.get(`/weather/advisory/${encodeURIComponent(location)}`, { params });
+};
 
 // ─── Crop APIs ─────────────────────────────────────────────
 export const getCropRecommendation = (data) =>
