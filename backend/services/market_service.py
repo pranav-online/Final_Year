@@ -5,7 +5,6 @@ from models.market import CropListing
 from pymongo.errors import PyMongoError
 from services.demand_analysis import (
     DEMAND_THRESHOLDS,
-    REGION_COORDINATES,
     add_supply,
     build_market_signal,
     empty_supply_index,
@@ -15,15 +14,17 @@ from services.demand_analysis import (
 from services.demand_ml_service import (
     CROP_MAP,
     predict_dynamic_threshold,
-    analyze_supply_trend,
     estimate_price_impact,
 )
 from services.region_service import (
     get_all_regions,
-    get_nearest_regions,
     get_region_info,
 )
 from services import local_market_store
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _listing_to_doc(listing: CropListing) -> dict:
@@ -119,10 +120,7 @@ def _build_demo_supply_summary(region: str) -> dict:
 
 async def _load_local_regional_supply_index(query: dict = None) -> dict:
     listings = await local_market_store.find_listings(query or {"status": "available"})
-    data = _build_regional_data_from_listings(listings)
-    if not data:
-        return _seed_demo_regional_data()
-    return data
+    return _build_regional_data_from_listings(listings)
 
 
 async def _load_regional_supply_index(query: dict = None) -> dict:
@@ -137,9 +135,25 @@ async def _load_regional_supply_index(query: dict = None) -> dict:
             doc.get("quantity_kg", 0),
         )
 
-    if not regional_data:
-        return _seed_demo_regional_data()
     return regional_data
+
+
+async def _load_supply_index_any_storage() -> tuple[dict, str]:
+    """Load the regional supply index from MongoDB, falling back to the local store."""
+    try:
+        return await _load_regional_supply_index(), "mongodb"
+    except PyMongoError:
+        return await _load_local_regional_supply_index(), "local"
+
+
+def _with_demo_fallback(regional_data: dict) -> tuple[dict, bool]:
+    """
+    Use the demo seed only when there are no farmer listings anywhere, and
+    report that it was used so every response can label it (is_demo).
+    """
+    if regional_data:
+        return regional_data, False
+    return _seed_demo_regional_data(), True
 
 
 async def _save_alert_history(signals: list) -> None:
@@ -398,27 +412,28 @@ async def get_all_regional_supply() -> dict:
 async def analyze_demand(region: str, crop_name: str = None) -> dict:
     try:
         region_key = normalize_key(region)
-        regional_data = await _load_regional_supply_index()
-        if region_key not in regional_data and region_key not in {normalize_key(key) for key in REGION_COORDINATES.keys()}:
-            regional_data[region_key] = {}
-        supply_summary = dict(regional_data.get(region_key, {}))
+        regional_data, storage = await _load_supply_index_any_storage()
+        regional_data, is_demo = _with_demo_fallback(regional_data)
 
+        # Only this region's own listings are analysed. A region with no
+        # listings gets an empty analysis, never another region's data.
+        supply_summary = dict(regional_data.get(region_key, {}))
         if crop_name:
             crop_key = normalize_key(crop_name)
-            supply_summary = {
-                crop_key: supply_summary.get(crop_key, 0)
-            }
-
-        if not supply_summary:
-            fallback_region = "hyderabad" if region_key else "hyderabad"
-            fallback = _seed_demo_regional_data().get(fallback_region, {})
-            supply_summary = dict(fallback)
-            if crop_name:
-                crop_key = normalize_key(crop_name)
-                supply_summary = {crop_key: fallback.get(crop_key, 0)}
+            supply_summary = {crop_key: supply_summary.get(crop_key, 0)}
 
         result = _build_demand_result(region_key, supply_summary, regional_data)
-        await _save_alert_history(result["signals"])
+
+        # Demo signals must not be persisted as if they were real alerts.
+        if storage == "mongodb" and not is_demo:
+            try:
+                await _save_alert_history(result["signals"])
+            except PyMongoError:
+                storage = "local"
+
+        message = None
+        if not result["crop_analysis"]:
+            message = f"No available farmer listings found for '{region.strip()}'."
 
         return {
             "success": True,
@@ -426,72 +441,37 @@ async def analyze_demand(region: str, crop_name: str = None) -> dict:
             **result,
             "thresholds": DEMAND_THRESHOLDS,
             "total_alerts": len(result["alerts"]),
-        }
-    except PyMongoError:
-        region_key = normalize_key(region)
-        regional_data = await _load_local_regional_supply_index()
-        supply_summary = dict(regional_data.get(region_key, {}))
-
-        if not supply_summary:
-            fallback = _seed_demo_regional_data().get(region_key or "hyderabad", {})
-            supply_summary = dict(fallback)
-
-        if crop_name:
-            crop_key = normalize_key(crop_name)
-            supply_summary = {
-                crop_key: supply_summary.get(crop_key, 0)
-            }
-
-        result = _build_demand_result(region_key, supply_summary, regional_data)
-
-        return {
-            "success": True,
-            "region": region_key,
-            **result,
-            "thresholds": DEMAND_THRESHOLDS,
-            "total_alerts": len(result["alerts"]),
-            "storage": "local",
+            "is_demo": is_demo,
+            "source": "demo_estimate" if is_demo else "farmer_listings",
+            "generated_at": _utc_now_iso(),
+            "storage": storage,
+            "message": message,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 async def get_market_summary() -> dict:
+    storage = "mongodb"
     try:
-        cursor = market_collection.find({"status": "available"})
+        try:
+            listings = [doc async for doc in market_collection.find({"status": "available"})]
+        except PyMongoError:
+            listings = await local_market_store.find_listings({"status": "available"})
+            storage = "local"
 
-        regional_data = {}
-        total_listings = 0
-
-        async for doc in cursor:
-            region = doc["location"]
-            crop = doc["crop_name"]
-            qty = doc["quantity_kg"]
-            total_listings += 1
-
-            if region not in regional_data:
-                regional_data[region] = {}
-            if crop not in regional_data[region]:
-                regional_data[region][crop] = 0
-            regional_data[region][crop] += qty
-
-        return {
-            "success": True,
-            "total_listings": total_listings,
-            "regions_active": len(regional_data),
-            "regional_summary": regional_data,
-            "thresholds": DEMAND_THRESHOLDS,
-        }
-    except PyMongoError:
-        listings = await local_market_store.find_listings({"status": "available"})
         regional_data = _build_regional_data_from_listings(listings)
         return {
             "success": True,
             "total_listings": len(listings),
+            "total_quantity_kg": round(
+                sum(float(doc.get("quantity_kg") or 0) for doc in listings), 2
+            ),
             "regions_active": len(regional_data),
             "regional_summary": regional_data,
             "thresholds": DEMAND_THRESHOLDS,
-            "storage": "local",
+            "generated_at": _utc_now_iso(),
+            "storage": storage,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -499,12 +479,8 @@ async def get_market_summary() -> dict:
 
 async def get_all_market_alerts() -> dict:
     try:
-        storage = "mongodb"
-        try:
-            regional_data = await _load_regional_supply_index()
-        except PyMongoError:
-            regional_data = await _load_local_regional_supply_index()
-            storage = "local"
+        regional_data, storage = await _load_supply_index_any_storage()
+        regional_data, is_demo = _with_demo_fallback(regional_data)
 
         signals = []
         for region, crops in regional_data.items():
@@ -512,7 +488,7 @@ async def get_all_market_alerts() -> dict:
                 _build_demand_result(region, crops, regional_data)["signals"]
             )
 
-        if storage != "local":
+        if storage == "mongodb" and not is_demo:
             try:
                 await _save_alert_history(signals)
             except PyMongoError:
@@ -524,68 +500,10 @@ async def get_all_market_alerts() -> dict:
             "high_alerts": sum(signal["severity"] == "high" for signal in signals),
             "medium_alerts": sum(signal["severity"] == "medium" for signal in signals),
             "alerts": signals,
+            "is_demo": is_demo,
+            "source": "demo_estimate" if is_demo else "farmer_listings",
+            "generated_at": _utc_now_iso(),
             "storage": storage,
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-async def get_enhanced_demand_analysis(
-    region: str,
-    crop: str,
-    current_supply: float,
-    supply_history: list = None,
-) -> dict:
-    """
-    Enhanced broker market analysis combining
-    all 4 intelligence modules.
-    """
-    try:
-        info = get_region_info(region) or {}
-        month = datetime.datetime.now().month
-
-        # 1. Dynamic ML threshold
-        threshold_data = predict_dynamic_threshold(
-            crop=crop,
-            region_type=info.get("region_type", "semi-urban"),
-            population_density=info.get("population_density", 3000),
-            market_size=info.get("market_size", "medium"),
-            month=month,
-        )
-        threshold = threshold_data["predicted_threshold_kg"]
-
-        # 2. Supply status
-        if current_supply > 1.5 * threshold:
-            status = "Oversupply"
-        elif current_supply < 0.5 * threshold:
-            status = "Undersupply"
-        else:
-            status = "Balanced"
-
-        # 3. Nearby regions
-        nearby = get_nearest_regions(region, crop, n=3)
-
-        # 4. Trend analysis
-        trend = None
-        if supply_history and len(supply_history) >= 2:
-            trend = analyze_supply_trend(supply_history, threshold)
-
-        # 5. Price impact
-        price = None
-        if status == "Oversupply":
-            price = estimate_price_impact(crop, current_supply, threshold)
-
-        return {
-            "success": True,
-            "region": region,
-            "crop": crop,
-            "current_supply_kg": current_supply,
-            "supply_status": status,
-            "dynamic_threshold": threshold_data,
-            "nearest_regions": nearby,
-            "trend_analysis": trend,
-            "price_impact": price,
-            "analysis_engine": "ALIP Enhanced Broker Intelligence v2.0",
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

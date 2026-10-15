@@ -1,6 +1,10 @@
-from fastapi import APIRouter
-from services.demand_ml_service import predict_dynamic_threshold
-from services.region_service import get_region_info
+from fastapi import APIRouter, Body, Depends
+from config.auth_deps import require_role
+from services.demand_ml_service import (
+    predict_dynamic_threshold,
+    analyze_supply_trend,
+    estimate_price_impact
+)
 from services.region_service import (
     get_nearest_regions,
     get_distance_between,
@@ -8,7 +12,7 @@ from services.region_service import (
     get_region_info
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_role("broker"))])
 
 # Get nearest regions for redistribution
 @router.get("/regions/nearest/{region}/{crop}")
@@ -73,6 +77,7 @@ async def region_info(region: str):
         "region":  region,
         "info":    info
     }
+
 @router.get("/demand/threshold/{region}/{crop}")
 async def dynamic_threshold(region: str, crop: str):
     region = region.strip()
@@ -91,11 +96,6 @@ async def dynamic_threshold(region: str, crop: str):
         market_size       = info.get("market_size", "medium")
     )
     return {"success": True, **result}
-from services.demand_ml_service import (
-    predict_dynamic_threshold,
-    analyze_supply_trend
-)
-from fastapi import Body
 
 @router.post("/demand/trend/{region}/{crop}")
 async def supply_trend(
@@ -103,7 +103,7 @@ async def supply_trend(
     crop: str,
     supply_history: list = Body(
         ...,
-        example=[300, 450, 600, 800, 1100]
+        examples=[[300, 450, 600, 800, 1100]]
     )
 ):
     region = region.strip()
@@ -133,11 +133,6 @@ async def supply_trend(
         "dynamic_threshold":threshold,
         "trend_analysis":   trend
     }
-from services.demand_ml_service import (
-    predict_dynamic_threshold,
-    analyze_supply_trend,
-    estimate_price_impact
-)
 
 @router.get("/demand/price-impact/{region}/{crop}/{supply_kg}")
 async def price_impact(
@@ -166,7 +161,6 @@ async def price_impact(
     impact = estimate_price_impact(crop, supply_kg, threshold)
 
     # Nearest regions for redistribution
-    from services.region_service import get_nearest_regions
     nearby = get_nearest_regions(region, crop, n=3)
 
     return {

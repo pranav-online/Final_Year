@@ -323,14 +323,14 @@ export default function BrokerDashboard() {
           {/* Left text */}
           <div style={S.heroLeft}>
             <div style={S.heroBadge}>
-              <span style={S.heroBadgeDot} /> Live Market Data
+              <span style={S.heroBadgeDot} /> Farmer Listing Data
             </div>
             <h1 style={S.heroTitle}>
               Market<br />
               <span style={S.heroTitleGrad}>Overview</span>
             </h1>
             <p style={S.heroSub}>
-              Real-time intelligence on crop supply, demand gaps and
+              Crop supply from farmer listings, demand gaps and
               regional market signals — all in one place.
             </p>
             <button style={S.heroBtn} onClick={() => navigate('/demand')}>
@@ -360,8 +360,8 @@ export default function BrokerDashboard() {
                   label="Crop Types" color="#16a34a" delay={0.26} start={statsVis}
                 />
                 <StatCard
-                  icon="📈" value={summary.total_listings > 0 ? Math.round(summary.total_listings * 0.73) : 0}
-                  label="Active Deals" color="#ea580c" delay={0.34} start={statsVis}
+                  icon="⚖️" value={Math.round(summary.total_quantity_kg || 0)}
+                  label="Kg Listed" color="#ea580c" delay={0.34} start={statsVis}
                 />
               </>
             ) : (

@@ -19,7 +19,9 @@ except Exception:  # pragma: no cover - optional dependency during startup
 
 import joblib, os, datetime
 
-os.makedirs("data", exist_ok=True)
+# Resolve relative to backend/ so the server can be started from any directory
+# without retraining or writing a stray pickle into the current folder.
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
 # ─── Encodings ─────────────────────────────────────────
 CROP_MAP    = {"rice":0,"wheat":1,"maize":2,"cotton":3,
@@ -115,7 +117,7 @@ Y_TRAIN = [
     260,290,380,230,
 ]
 
-MODEL_PATH = "data/demand_model.pkl"
+MODEL_PATH = os.path.join(DATA_DIR, "demand_model.pkl")
 
 # ─── Train Model ───────────────────────────────────────
 def train_demand_model():
@@ -136,6 +138,7 @@ def train_demand_model():
     print(f"5-Fold CV R²: "
           f"{scores.mean():.4f} ± {scores.std():.4f}")
     model.fit(X, y)
+    os.makedirs(DATA_DIR, exist_ok=True)
     joblib.dump(model, MODEL_PATH)
     print(f"✅ Model saved → {MODEL_PATH}")
     return model

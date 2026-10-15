@@ -18,6 +18,24 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// The backend now validates the token on protected routes. If it is missing
+// or expired (401), clear the stale session and send the user to log in again.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error.response?.status;
+    const url = error.config?.url || '';
+    if (status === 401 && !url.startsWith('/auth/')) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login');
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ─── Auth APIs ─────────────────────────────────────────────
 export const registerUser = (data) =>
   api.post('/auth/register', data);
@@ -59,8 +77,10 @@ export const getRegionalSupply = (region) =>
 export const getAllRegionalSupply = () =>
   api.get('/market/supply');
 
-export const getDemandAnalysis = (region) =>
-  api.get(`/market/demand/${region}`);
+export const getDemandAnalysis = (region, crop = null) =>
+  api.get(`/market/demand/${encodeURIComponent(region.trim())}`, {
+    params: crop ? { crop } : {},
+  });
 
 export const getMarketSummary = () =>
   api.get('/market/summary');

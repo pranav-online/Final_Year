@@ -106,6 +106,24 @@ export default function DemandAnalysis() {
         {/* ── Results ── */}
         {result && (
           <>
+            {/* ── Data provenance ── */}
+            {result.is_demo && (
+              <div style={s.demoBanner} role="status">
+                <span style={s.demoIcon}>⚠️</span>
+                <div>
+                  <strong>Demo data — not real market figures.</strong>{' '}
+                  No farmer listings exist in the system yet, so the sample
+                  dataset is shown. Numbers below are illustrative only.
+                </div>
+              </div>
+            )}
+            {result.generated_at && (
+              <div style={s.provenance}>
+                Source: {result.is_demo ? 'demo sample' : 'farmer listings in ALIP'}
+                {' · '}Generated {new Date(result.generated_at).toLocaleString()}
+              </div>
+            )}
+
             {/* ── Market Alerts ── */}
             {result.alerts?.length > 0 && (
               <div style={s.section}>
@@ -161,7 +179,8 @@ export default function DemandAnalysis() {
                 Market Balance —&nbsp;<strong>{result.region}</strong>
               </div>
               <p style={s.balanceNote}>
-                Expected demand is estimated from the crop, season and regional market profile.
+                Expected demand is a rough estimate from the crop, season and city profile —
+                it is not yet based on mandi price or arrival data.
               </p>
 
               <div style={s.cropsGrid}>
@@ -277,7 +296,7 @@ export default function DemandAnalysis() {
                     <div style={s.emptyIcon}>📦</div>
                     <div style={s.emptyTitle}>No crop data available</div>
                     <div style={s.emptySub}>
-                      No supply records found for this region.
+                      {result.message || 'No supply records found for this region.'}
                     </div>
                   </div>
                 )}
@@ -292,8 +311,8 @@ export default function DemandAnalysis() {
             <div style={s.emptyStateEmoji}>📊</div>
             <div style={s.emptyStateTitle}>Enter a Region to Begin</div>
             <p style={s.emptyStateSub}>
-              Type a city or district above to view real-time market
-              supply–demand balance, alerts and redistribution recommendations.
+              Type a city or district above to view the supply–demand balance
+              of current farmer listings, alerts and redistribution recommendations.
             </p>
           </div>
         )}
@@ -474,6 +493,22 @@ const s = {
     fontSize: '0.75rem', color: '#16a34a',
     cursor: 'pointer', fontFamily: 'inherit',
     fontWeight: 600, transition: 'all 0.2s',
+  },
+
+  /* ── DATA PROVENANCE ── */
+  demoBanner: {
+    display: 'flex', alignItems: 'flex-start', gap: '0.7rem',
+    background: '#fffbeb',
+    border: '1.5px solid #fcd34d',
+    borderRadius: 12,
+    padding: '0.9rem 1.2rem',
+    marginBottom: '0.8rem',
+    color: '#78350f', fontSize: '0.86rem', lineHeight: 1.6,
+  },
+  demoIcon: { fontSize: '1.1rem', flexShrink: 0 },
+  provenance: {
+    color: '#6b7280', fontSize: '0.75rem',
+    marginBottom: '1.5rem',
   },
 
   /* ── SECTION LABEL ── */

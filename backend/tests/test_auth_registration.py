@@ -57,6 +57,8 @@ async def test_demand_analysis_returns_fallback_signals_when_market_is_empty(mon
 
     assert result["success"] is True
     assert result["region"] == "hyderabad"
+    assert result["is_demo"] is True
+    assert result["source"] == "demo_estimate"
     assert result["analysis"]
     assert result["total_alerts"] >= 0
     assert result["crop_analysis"]["rice"]["expected_demand_kg"] > 0

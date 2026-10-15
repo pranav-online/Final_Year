@@ -15,7 +15,3 @@ class CropListing(BaseModel):
     price_per_kg: float = Field(gt=0, allow_inf_nan=False)
     status: CropStatus = CropStatus.available
     contact: Optional[str] = None
-
-class DemandQuery(BaseModel):
-    region: str
-    crop_name: Optional[str] = None
