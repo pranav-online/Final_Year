@@ -61,10 +61,13 @@ async def demand_overview(
     return {"success": True, **result}
 
 
-@router.get("/market/demand/alerts", dependencies=[Depends(require_role("broker"))])
-async def demand_alerts(since: str = None, commodity: str = None, limit: int = Query(100, ge=1, le=500)):
+@router.get("/market/demand/alerts")
+async def demand_alerts(since: str = None, commodity: str = None, limit: int = Query(100, ge=1, le=500),
+                        user: dict = Depends(require_role("broker"))):
+    """Market-wide alerts plus this broker's own listing matches."""
     cid = _commodity_or_404(commodity) if commodity else None
-    alerts = await (await get_store()).find_alerts(since=since, commodity=cid, limit=limit)
+    alerts = await (await get_store()).find_alerts(since=since, commodity=cid, limit=limit,
+                                                   broker_id=user["sub"])
     for alert in alerts:
         alert["id"] = str(alert.pop("_id", ""))
     return {"success": True, "total": len(alerts), "alerts": alerts}

@@ -20,23 +20,58 @@ from services.region_service import (
     get_region_info,
 )
 from services import local_market_store
+from services.mandi.config import resolve_commodity
+from bson import ObjectId
 
 
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def _listing_to_doc(listing: CropListing) -> dict:
+def _listing_to_doc(listing: CropListing, farmer_id: str = None) -> dict:
     return {
         "farmer_name": listing.farmer_name,
+        "farmer_id": farmer_id,
         "location": normalize_key(listing.location),
         "crop_name": normalize_key(listing.crop_name),
+        # canonical commodity id for mandi matching (None for untracked crops)
+        "commodity_id": resolve_commodity(listing.crop_name),
         "quantity_kg": listing.quantity_kg,
         "price_per_kg": listing.price_per_kg,
         "status": listing.status.value,
         "contact": listing.contact,
+        "available_from": listing.available_from.isoformat() if listing.available_from else None,
         "created_at": datetime.datetime.utcnow(),
     }
+
+
+def _mongo_id(listing_id: str):
+    return ObjectId(listing_id) if ObjectId.is_valid(listing_id) else listing_id
+
+
+async def set_listing_status(listing_id: str, status: str) -> bool:
+    """Move a listing through available -> pending -> sold (driven by shipments)."""
+    try:
+        result = await market_collection.update_one({"_id": _mongo_id(listing_id)}, {"$set": {"status": status}})
+        return result.matched_count > 0
+    except PyMongoError:
+        return await local_market_store.update_listing(listing_id, {"status": status})
+
+
+async def get_listing(listing_id: str):
+    try:
+        doc = await market_collection.find_one({"_id": _mongo_id(listing_id)})
+    except PyMongoError:
+        docs = await local_market_store.find_listings({"_id": listing_id})
+        doc = docs[0] if docs else None
+    return doc
+
+
+async def load_listings(query: dict = None) -> list[dict]:
+    try:
+        return [doc async for doc in market_collection.find(query or {})]
+    except PyMongoError:
+        return await local_market_store.find_listings(query)
 
 
 def _build_supply_summary_from_listings(listings: list[dict]) -> dict:
@@ -282,22 +317,26 @@ def _build_demand_result(region: str, supply_summary: dict, regional_data: dict)
     }
 
 
-async def add_crop_listing(listing: CropListing) -> dict:
-    doc = _listing_to_doc(listing)
+async def add_crop_listing(listing: CropListing, farmer_id: str = None) -> dict:
+    """Store a listing. The stored document is returned under "listing" for broker matching."""
+    doc = _listing_to_doc(listing, farmer_id)
     try:
         result = await market_collection.insert_one(doc)
         return {
             "success": True,
             "message": "Crop listing added successfully",
             "id": str(result.inserted_id),
+            "listing": {**doc, "_id": str(result.inserted_id)},
         }
     except PyMongoError:
+        doc.pop("_id", None)  # insert_one may have assigned one before failing
         inserted_id = await local_market_store.insert_listing(doc)
         return {
             "success": True,
             "message": "Crop listing added successfully",
             "id": inserted_id,
             "storage": "local",
+            "listing": {**doc, "_id": inserted_id},
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

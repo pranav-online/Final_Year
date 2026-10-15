@@ -48,6 +48,17 @@ async def insert_listing(doc: dict) -> str:
         return listing_id
 
 
+async def update_listing(listing_id: str, fields: dict) -> bool:
+    with _lock:
+        listings = _load_listings()
+        for listing in listings:
+            if listing.get("_id") == listing_id:
+                listing.update(fields)
+                _save_listings(listings)
+                return True
+        return False
+
+
 async def find_listings(query: dict | None = None) -> list[dict]:
     with _lock:
         return [

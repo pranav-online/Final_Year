@@ -97,8 +97,22 @@ class MandiStore:
 
     async def find_signals(self, commodity: str = None, level: str = None) -> list[dict]:
         return await self.find_scoped("signals", commodity, level)
+
     async def insert_alert_if_new(self, alert: dict, window_hours: int = 24) -> bool: ...
-    async def find_alerts(self, since: str = None, commodity: str = None, limit: int = 200) -> list[dict]: ...
+    async def find_alerts(self, since: str = None, commodity: str = None, limit: int = 200,
+                          broker_id: str = None) -> list[dict]:
+        """Market-wide alerts plus, when broker_id is given, alerts addressed to that broker."""
+        ...
+
+    # broker settings and shipments (phase 4)
+    async def get_broker_settings(self, broker_id: str): ...
+    async def put_broker_settings(self, broker_id: str, doc: dict) -> None: ...
+    async def all_broker_settings(self) -> list[dict]: ...
+    async def insert_shipment(self, doc: dict) -> None: ...
+    async def get_shipment(self, shipment_id: str): ...
+    async def update_shipment(self, shipment_id: str, doc: dict) -> None: ...
+    async def find_shipments(self, broker_id: str = None, status: str = None,
+                             commodity: str = None, destination_key: str = None) -> list[dict]: ...
 
 
 def _window_start(window_hours: int) -> str:
@@ -151,7 +165,16 @@ class SqliteMandiStore(MandiStore):
                 );
                 CREATE INDEX IF NOT EXISTS ix_alerts_dedupe ON alerts(dedupe_key, created_at);
                 CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts(created_at);
+                CREATE TABLE IF NOT EXISTS broker_settings (broker_id TEXT PRIMARY KEY, doc TEXT);
+                CREATE TABLE IF NOT EXISTS shipments (
+                    id TEXT PRIMARY KEY, broker_id TEXT, status TEXT, commodity TEXT,
+                    destination_key TEXT, created_at TEXT, doc TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_shipments_broker ON shipments(broker_id, created_at);
             """)
+            columns = {r[1] for r in self._conn.execute("PRAGMA table_info(alerts)")}
+            if "broker_id" not in columns:  # migrate alert tables created before phase 4
+                self._conn.execute("ALTER TABLE alerts ADD COLUMN broker_id TEXT")
 
     async def _run(self, fn, *args):
         return await asyncio.to_thread(self._locked, fn, *args)
@@ -369,24 +392,77 @@ class SqliteMandiStore(MandiStore):
             return False
         with self._conn:
             self._conn.execute(
-                "INSERT INTO alerts (id, dedupe_key, commodity, created_at, doc) VALUES (?,?,?,?,?)",
-                (alert["_id"], alert["dedupe_key"], alert["commodity"], alert["created_at"], json.dumps(alert)))
+                "INSERT INTO alerts (id, dedupe_key, commodity, created_at, broker_id, doc) VALUES (?,?,?,?,?,?)",
+                (alert["_id"], alert["dedupe_key"], alert["commodity"], alert["created_at"],
+                 alert.get("broker_id"), json.dumps(alert)))
         return True
 
     async def insert_alert_if_new(self, alert, window_hours=24):
         return await self._run(self._insert_alert_if_new, alert, window_hours)
 
-    def _find_alerts(self, since, commodity, limit):
+    def _find_alerts(self, since, commodity, limit, broker_id):
         sql, args = "SELECT doc FROM alerts WHERE 1=1", []
         if since:
             sql += " AND created_at >= ?"; args.append(since)
         if commodity:
             sql += " AND commodity = ?"; args.append(commodity)
+        if broker_id:
+            sql += " AND (broker_id IS NULL OR broker_id = ?)"; args.append(broker_id)
+        else:
+            sql += " AND broker_id IS NULL"
         sql += " ORDER BY created_at DESC LIMIT ?"; args.append(limit)
         return [json.loads(r[0]) for r in self._conn.execute(sql, args)]
 
-    async def find_alerts(self, since=None, commodity=None, limit=200):
-        return await self._run(self._find_alerts, since, commodity, limit)
+    async def find_alerts(self, since=None, commodity=None, limit=200, broker_id=None):
+        return await self._run(self._find_alerts, since, commodity, limit, broker_id)
+
+    # broker settings and shipments
+    async def get_broker_settings(self, broker_id):
+        row = await self._run(lambda: self._conn.execute(
+            "SELECT doc FROM broker_settings WHERE broker_id = ?", (broker_id,)).fetchone())
+        return json.loads(row[0]) if row else None
+
+    def _put_broker_settings(self, broker_id, doc):
+        with self._conn:
+            self._conn.execute("INSERT OR REPLACE INTO broker_settings (broker_id, doc) VALUES (?,?)",
+                               (broker_id, json.dumps(doc)))
+
+    async def put_broker_settings(self, broker_id, doc):
+        await self._run(self._put_broker_settings, broker_id, doc)
+
+    async def all_broker_settings(self):
+        return await self._run(lambda: [
+            json.loads(r[0]) for r in self._conn.execute("SELECT doc FROM broker_settings")])
+
+    def _write_shipment(self, doc, insert):
+        with self._conn:
+            self._conn.execute(
+                f"INSERT {'' if insert else 'OR REPLACE '}INTO shipments "
+                "(id, broker_id, status, commodity, destination_key, created_at, doc) VALUES (?,?,?,?,?,?,?)",
+                (doc["_id"], doc["broker_id"], doc["status"], doc["commodity"],
+                 doc["destination_key"], doc["created_at"], json.dumps(doc)))
+
+    async def insert_shipment(self, doc):
+        await self._run(self._write_shipment, doc, True)
+
+    async def update_shipment(self, shipment_id, doc):
+        await self._run(self._write_shipment, {**doc, "_id": shipment_id}, False)
+
+    async def get_shipment(self, shipment_id):
+        row = await self._run(lambda: self._conn.execute(
+            "SELECT doc FROM shipments WHERE id = ?", (shipment_id,)).fetchone())
+        return json.loads(row[0]) if row else None
+
+    def _find_shipments(self, broker_id, status, commodity, destination_key):
+        sql, args = "SELECT doc FROM shipments WHERE 1=1", []
+        for column, value in (("broker_id", broker_id), ("status", status),
+                              ("commodity", commodity), ("destination_key", destination_key)):
+            if value:
+                sql += f" AND {column} = ?"; args.append(value)
+        return [json.loads(r[0]) for r in self._conn.execute(sql + " ORDER BY created_at DESC", args)]
+
+    async def find_shipments(self, broker_id=None, status=None, commodity=None, destination_key=None):
+        return await self._run(self._find_shipments, broker_id, status, commodity, destination_key)
 
     def close(self):
         self._conn.close()
@@ -548,14 +624,43 @@ class MongoMandiStore(MandiStore):
         await self.alerts.insert_one(dict(alert))
         return True
 
-    async def find_alerts(self, since=None, commodity=None, limit=200):
-        query = {}
+    async def find_alerts(self, since=None, commodity=None, limit=200, broker_id=None):
+        query = {"broker_id": {"$in": [None, broker_id]} if broker_id else None}
         if since:
             query["created_at"] = {"$gte": since}
         if commodity:
             query["commodity"] = commodity
         cursor = self.alerts.find(query).sort("created_at", -1).limit(limit)
         return [doc async for doc in cursor]
+
+    async def get_broker_settings(self, broker_id):
+        doc = await self._db["broker_settings"].find_one({"_id": broker_id})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    async def put_broker_settings(self, broker_id, doc):
+        await self._db["broker_settings"].replace_one({"_id": broker_id}, {**doc, "_id": broker_id}, upsert=True)
+
+    async def all_broker_settings(self):
+        docs = [doc async for doc in self._db["broker_settings"].find({})]
+        for doc in docs:
+            doc.pop("_id", None)
+        return docs
+
+    async def insert_shipment(self, doc):
+        await self._db["shipments"].insert_one(dict(doc))
+
+    async def update_shipment(self, shipment_id, doc):
+        await self._db["shipments"].replace_one({"_id": shipment_id}, {**doc, "_id": shipment_id})
+
+    async def get_shipment(self, shipment_id):
+        return await self._db["shipments"].find_one({"_id": shipment_id})
+
+    async def find_shipments(self, broker_id=None, status=None, commodity=None, destination_key=None):
+        query = {k: v for k, v in (("broker_id", broker_id), ("status", status), ("commodity", commodity),
+                                   ("destination_key", destination_key)) if v}
+        return [doc async for doc in self._db["shipments"].find(query).sort("created_at", -1)]
 
 
 # ─── Store selection ───────────────────────────────────────

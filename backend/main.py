@@ -8,6 +8,7 @@ from routes.market import router as market_router
 from routes.notifications import router as notifications_router
 from routes.region_routes import router as region_router
 from routes.mandi_routes import router as mandi_router
+from routes.decision_routes import router as decision_router
 from services.mandi.scheduler import start_scheduler, shutdown_scheduler
 from config.database import ping_database
 from pymongo.errors import PyMongoError
@@ -45,6 +46,7 @@ app.include_router(crop_router)
 # Before market_router: its /market/demand/{region} would otherwise capture
 # fixed paths like /market/demand/overview.
 app.include_router(mandi_router)
+app.include_router(decision_router)
 app.include_router(market_router)
 app.include_router(notifications_router)
 app.include_router(region_router, prefix="/market",
