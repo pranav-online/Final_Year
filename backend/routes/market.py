@@ -6,7 +6,6 @@ from services.market_service import (
     get_all_listings,
     get_all_regional_supply,
     get_regional_supply,
-    analyze_demand,
     get_market_summary
 )
 from services.demand_analysis import DEMAND_THRESHOLDS
@@ -53,14 +52,6 @@ async def all_regional_supply():
 @router.get("/supply/{region}", dependencies=broker_only)
 async def regional_supply(region: str):
     result = await get_regional_supply(region)
-    if not result["success"]:
-        raise HTTPException(status_code=500, detail=result["error"])
-    return result
-
-# Analyze demand and get alerts
-@router.get("/demand/{region}", dependencies=broker_only)
-async def demand_analysis(region: str, crop: str = None):
-    result = await analyze_demand(region, crop)
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result["error"])
     return result

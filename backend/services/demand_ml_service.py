@@ -1,16 +1,14 @@
 """
-ALIP - legacy demand helpers for the /market/demand/{region} view.
+ALIP - legacy listing-based alert helpers (used by /notifications/alerts).
 
 The former "dynamic threshold" GradientBoostingRegressor was trained on 56
 hand-typed rows with no data source and no evaluation; it was removed in the
-demand-analysis redesign (phase 3). Real signals and forecasts now come from
-services/mandi. Until the legacy view is replaced (phase 4), the expected
-demand it shows is the configured per-crop threshold, labelled as such.
+demand-analysis redesign. Real signals, forecasts and decisions now come from
+services/mandi. The listing-based notifications still compare listed supply
+with the configured per-crop threshold, labelled as a placeholder.
 """
 
 import datetime
-
-import numpy as np
 
 from services.demand_analysis import get_demand_threshold
 
@@ -43,108 +41,6 @@ def predict_dynamic_threshold(
     }
 
 
-# ─── Supply Trend Analysis ─────────────────────────────
-def analyze_supply_trend(
-    supply_history: list,
-    threshold: float
-) -> dict:
-    """
-    Analyze supply trend over time using
-    linear regression on historical data.
-    Predicts next period and urgency level.
-    Enhancement 3: Supply Trend Analysis
-    """
-    if len(supply_history) < 2:
-        return {
-            "trend":      "insufficient_data",
-            "prediction": None,
-            "urgency":    "unknown"
-        }
-
-    x = np.arange(len(supply_history), dtype=float)
-    y = np.array(supply_history, dtype=float)
-
-    # Linear regression coefficients
-    coeffs    = np.polyfit(x, y, 1)
-    slope     = coeffs[0]
-    intercept = coeffs[1]
-
-    # Next period prediction
-    next_val  = slope * len(supply_history) + intercept
-    next_val  = max(0.0, round(float(next_val), 2))
-
-    # Trend classification
-    mean_y      = float(np.mean(y))
-    pct_change  = (slope / (mean_y + 1e-9)) * 100
-
-    if pct_change > 15:
-        trend   = "rapidly_increasing"
-        urgency = "critical"
-    elif pct_change > 5:
-        trend   = "increasing"
-        urgency = "high"
-    elif pct_change < -15:
-        trend   = "rapidly_decreasing"
-        urgency = "monitor"
-    elif pct_change < -5:
-        trend   = "decreasing"
-        urgency = "low"
-    else:
-        trend   = "stable"
-        urgency = "normal"
-
-    # Weeks until oversupply breach (1.5x threshold)
-    breach_level      = threshold * 1.5
-    weeks_to_breach   = None
-    if slope > 0 and y[-1] < breach_level:
-        remaining       = breach_level - y[-1]
-        weeks_to_breach = max(0, int(round(remaining / slope)))
-
-    # Trend message
-    # In analyze_supply_trend, update message for critical:
-    if urgency == "critical":
-      if y[-1] >= breach_level:
-        message = (
-            f"CRITICAL: Supply already at {y[-1]:.0f} kg — "
-            f"exceeds breach level of {breach_level:.0f} kg. "
-            f"Immediate redistribution required!"
-        )
-      else:
-        message = (
-            f"CRITICAL: Supply rapidly increasing "
-            f"({pct_change:.1f}%/period). "
-            f"Oversupply breach expected in "
-            f"{weeks_to_breach} weeks."
-        )
-    elif urgency == "high":
-        message = (
-            f"WARNING: Supply increasing steadily. "
-            f"Monitor closely — breach in "
-            f"{weeks_to_breach or 'unknown'} weeks."
-        )
-    elif urgency == "monitor":
-        message = (
-            f"MONITOR: Supply rapidly declining. "
-            f"Undersupply risk developing."
-        )
-    elif urgency == "low":
-        message = "Supply gradually declining. Normal seasonal pattern."
-    else:
-        message = "Supply stable within normal range."
-
-    return {
-        "history":           supply_history,
-        "periods_analysed":  len(supply_history),
-        "slope_per_period":  round(float(slope), 2),
-        "pct_change":        round(float(pct_change), 2),
-        "predicted_next_kg": next_val,
-        "trend":             trend,
-        "urgency":           urgency,
-        "weeks_to_breach":   weeks_to_breach,
-        "threshold":         threshold,
-        "breach_level":      breach_level,
-        "message":           message
-    }
 # ─── Price Sensitivity Database ────────────────────────
 PRICE_SENSITIVITY = {
     "rice":      {"base_price": 22,  "elasticity": -0.35},

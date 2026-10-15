@@ -1,3 +1,12 @@
+import sys
+
+# Services print emoji while loading models. When output goes to a file or pipe on
+# Windows (cp1252), that raised UnicodeEncodeError and crashed the API at import;
+# replace unprintable characters instead. Must run before the route imports.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from routes.auth import router as auth_router

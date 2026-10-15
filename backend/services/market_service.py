@@ -441,48 +441,6 @@ async def get_all_regional_supply() -> dict:
     }
 
 
-async def analyze_demand(region: str, crop_name: str = None) -> dict:
-    try:
-        region_key = normalize_key(region)
-        regional_data, storage = await _load_supply_index_any_storage()
-        regional_data, is_demo = _with_demo_fallback(regional_data)
-
-        # Only this region's own listings are analysed. A region with no
-        # listings gets an empty analysis, never another region's data.
-        supply_summary = dict(regional_data.get(region_key, {}))
-        if crop_name:
-            crop_key = normalize_key(crop_name)
-            supply_summary = {crop_key: supply_summary.get(crop_key, 0)}
-
-        result = _build_demand_result(region_key, supply_summary, regional_data)
-
-        # Demo signals must not be persisted as if they were real alerts.
-        if storage == "mongodb" and not is_demo:
-            try:
-                await _save_alert_history(result["signals"])
-            except PyMongoError:
-                storage = "local"
-
-        message = None
-        if not result["crop_analysis"]:
-            message = f"No available farmer listings found for '{region.strip()}'."
-
-        return {
-            "success": True,
-            "region": region_key,
-            **result,
-            "thresholds": DEMAND_THRESHOLDS,
-            "total_alerts": len(result["alerts"]),
-            "is_demo": is_demo,
-            "source": "demo_estimate" if is_demo else "farmer_listings",
-            "generated_at": _utc_now_iso(),
-            "storage": storage,
-            "message": message,
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
 async def get_market_summary() -> dict:
     storage = "mongodb"
     try:

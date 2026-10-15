@@ -8,7 +8,8 @@ from config.security import create_access_token
 from main import app
 from services import demand_ml_service, market_service
 from services.demand_analysis import REGION_COORDINATES, haversine_km
-from services.market_service import analyze_demand, get_all_market_alerts
+from services.market_service import get_all_market_alerts
+from services.mandi.store import SqliteMandiStore, set_store
 from services.region_service import REGIONS, get_distance_between
 
 
@@ -21,36 +22,36 @@ def _auth(role: str) -> dict:
 
 
 @pytest.fixture
-def client(monkeypatch):
-    async def fake_analyze_demand(region, crop=None):
-        return {"success": True, "region": region, "crop_analysis": {}, "is_demo": False}
-
+def client(monkeypatch, tmp_path):
     async def fake_alerts():
         return {"success": True, "alerts": [], "is_demo": False}
 
-    monkeypatch.setattr("routes.market.analyze_demand", fake_analyze_demand)
     monkeypatch.setattr("routes.notifications.get_all_market_alerts", fake_alerts)
-    return TestClient(app)
+    store = SqliteMandiStore(tmp_path / "mandi.sqlite3")  # never touch real data or wait on MongoDB
+    set_store(store)
+    yield TestClient(app)
+    set_store(None)
+    store.close()
 
 
 # ─── Backend role enforcement ──────────────────────────────
 
 def test_demand_endpoint_allows_broker(client):
-    res = client.get("/market/demand/hyderabad", headers=_auth("broker"))
+    res = client.get("/market/demand/model", headers=_auth("broker"))
     assert res.status_code == 200
 
 
 def test_demand_endpoint_rejects_farmer_with_403(client):
-    res = client.get("/market/demand/hyderabad", headers=_auth("farmer"))
+    res = client.get("/market/demand/model", headers=_auth("farmer"))
     assert res.status_code == 403
 
 
 def test_demand_endpoint_rejects_missing_token_with_401(client):
-    assert client.get("/market/demand/hyderabad").status_code == 401
+    assert client.get("/market/demand/model").status_code == 401
 
 
 def test_demand_endpoint_rejects_invalid_token_with_401(client):
-    res = client.get("/market/demand/hyderabad", headers={"Authorization": "Bearer not-a-jwt"})
+    res = client.get("/market/demand/model", headers={"Authorization": "Bearer not-a-jwt"})
     assert res.status_code == 401
 
 
@@ -75,26 +76,6 @@ def test_add_listing_requires_login(client):
 
 # ─── No silent demo substitution ───────────────────────────
 
-@pytest.mark.asyncio
-async def test_region_without_listings_gets_empty_analysis_not_hyderabad(monkeypatch):
-    async def listings_elsewhere(query=None):
-        return {"hyderabad": {"rice": 650}}
-
-    async def no_alert_history(signals):
-        return None
-
-    monkeypatch.setattr(market_service, "_load_regional_supply_index", listings_elsewhere)
-    monkeypatch.setattr(market_service, "_save_alert_history", no_alert_history)
-
-    result = await analyze_demand("Nowhere")
-
-    assert result["success"] is True
-    assert result["region"] == "nowhere"
-    assert result["crop_analysis"] == {}
-    assert result["is_demo"] is False
-    assert result["source"] == "farmer_listings"
-    assert "No available farmer listings" in result["message"]
-
 
 @pytest.mark.asyncio
 async def test_empty_market_is_labelled_demo_and_not_persisted(monkeypatch):
@@ -109,12 +90,9 @@ async def test_empty_market_is_labelled_demo_and_not_persisted(monkeypatch):
     monkeypatch.setattr(market_service, "_load_regional_supply_index", empty_index)
     monkeypatch.setattr(market_service, "_save_alert_history", record_alert_history)
 
-    demand = await analyze_demand("Nowhere")
     alerts = await get_all_market_alerts()
 
-    assert demand["is_demo"] is True and demand["source"] == "demo_estimate"
-    assert demand["crop_analysis"] == {}
-    assert alerts["is_demo"] is True
+    assert alerts["is_demo"] is True and alerts["source"] == "demo_estimate"
     assert saved == []
 
 

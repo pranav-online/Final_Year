@@ -1,738 +1,333 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getDemandAnalysis } from '../services/api';
 import toast from 'react-hot-toast';
+import {
+  getAllRegions, getBrokerSettings, getCommodityAnalysis, getDemandAlerts, getDemandOverview,
+  getListingMatches, getPriceCommodities, getPriceHistory, getShipments, initiateShipment,
+  saveBrokerSettings, updateShipmentStatus,
+} from '../services/api';
+import ActionCard from '../components/demand/ActionCard';
+import BestMarketsTable from '../components/demand/BestMarketsTable';
+import BestOptionCard from '../components/demand/BestOptionCard';
+import MarketCompareChart from '../components/demand/MarketCompareChart';
+import FanChart from '../components/demand/FanChart';
+import FreshnessBadge from '../components/demand/FreshnessBadge';
+import PressureHeatmap from '../components/demand/PressureHeatmap';
+import SignalStrip from '../components/demand/SignalStrip';
+import { AlertsFeed, MatchesPanel, SettingsPanel, ShipmentsPanel } from '../components/demand/SidePanels';
+import { C, COMMODITY_ICON, button, card, ghostButton, input, label, titleCase } from '../components/demand/theme';
+
+const QUICK_PLACES = ['Guntur', 'Hyderabad', 'Vijayawada', 'Bangalore', 'Pune', 'Chennai'];
+const skeleton = { background: 'linear-gradient(90deg,#f3f4f6 25%,#e5e7eb 50%,#f3f4f6 75%)', border: 'none' };
 
 /* ═══════════════════════════════════════════════════════════════
-   ALIP — Demand Analysis  (Broker Dashboard)  — Light Mode
+   ALIP — Demand Analysis (Broker)
+   Real mandi prices -> inferred pressure, gated forecasts and
+   where-to-sell decisions. Nothing on this page is invented.
 ═══════════════════════════════════════════════════════════════ */
 
-export default function DemandAnalysis() {
-  const navigate              = useNavigate();
-  const [region, setRegion]   = useState('');
-  const [result, setResult]   = useState(null);
-  const [loading, setLoading] = useState(false);
+const FALLBACK_COMMODITIES = [
+  'tomato', 'banana', 'onion', 'potato', 'maize', 'paddy', 'rice', 'wheat', 'cotton', 'groundnut',
+].map((id) => ({ id, name: titleCase(id) }));
 
-  const handleSubmit = async () => {
-    if (!region.trim()) { toast.error('Enter a region name!'); return; }
+const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 320px), 1fr))', gap: '1rem' };
+
+export function errorText(err, fallback) {
+  const detail = err && err.response && err.response.data && err.response.data.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail) && detail.length) return detail.map((d) => d.msg).join('; ');
+  return fallback;
+}
+
+export default function DemandAnalysis() {
+  const navigate = useNavigate();
+  const [commodities, setCommodities] = useState(FALLBACK_COMMODITIES);
+  const [regions, setRegions] = useState([]);
+  const [form, setForm] = useState({ commodity: 'tomato', location: '', qty: '', price: '' });
+  const [listingId, setListingId] = useState(null);
+
+  const [analysis, setAnalysis] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const [overview, setOverview] = useState(null);
+  const [alerts, setAlerts] = useState([]);
+  const [shipments, setShipments] = useState([]);
+  const [matches, setMatches] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [dispatchingTo, setDispatchingTo] = useState(null);
+  const [busyShipment, setBusyShipment] = useState(null);
+
+  const refreshMatches = useCallback(async (current) => {
+    if (!current || !current.home_region) { setMatches(null); return; }
+    try { setMatches((await getListingMatches()).data.matches); } catch { setMatches([]); }
+  }, []);
+
+  const refreshShipments = useCallback(async () => {
+    try { setShipments((await getShipments()).data.shipments); } catch { /* panel stays as is */ }
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const [c, r, s, o, a] = await Promise.allSettled([
+        getPriceCommodities(), getAllRegions(), getBrokerSettings(), getDemandOverview('state'), getDemandAlerts(),
+      ]);
+      if (c.status === 'fulfilled') setCommodities(c.value.data.commodities);
+      if (r.status === 'fulfilled') setRegions(r.value.data.regions);
+      if (o.status === 'fulfilled') setOverview(o.value.data);
+      if (a.status === 'fulfilled') setAlerts(a.value.data.alerts);
+      if (s.status === 'fulfilled') {
+        setSettings(s.value.data.settings);
+        refreshMatches(s.value.data.settings);
+      }
+      refreshShipments();
+    })();
+  }, [refreshMatches, refreshShipments]);
+
+  const analyse = async (next = form) => {
+    if (!next.location.trim()) { toast.error('Enter a city or state'); return; }
     setLoading(true);
+    setError(null);
     try {
-      const res = await getDemandAnalysis(region);
-      setResult(res.data);
-      toast.success('Analysis complete!');
-    } catch {
-      toast.error('Failed to analyse region.');
+      const res = await getCommodityAnalysis(next.commodity, next.location.trim(), {
+        qtyKg: Number(next.qty) || undefined, pricePerKg: Number(next.price) || undefined,
+      });
+      setAnalysis(res.data);
+      try {
+        const h = await getPriceHistory(next.commodity, { state: res.data.state, weeks: 26 });
+        setHistory(h.data.series);
+      } catch { setHistory([]); }
+    } catch (err) {
+      setAnalysis(null);
+      setError(errorText(err, 'Analysis failed. Is the backend running?'));
     }
     setLoading(false);
   };
 
+  const pickFromHeatmap = (commodity, state) => {
+    const next = { ...form, commodity, location: state };
+    setForm(next);
+    setListingId(null);
+    analyse(next);
+  };
+
+  const analyseListing = (m) => {
+    const next = {
+      commodity: m.commodity, location: titleCase(m.listing.location),
+      qty: String(m.listing.quantity_kg), price: String(m.listing.price_per_kg),
+    };
+    setForm(next);
+    setListingId(m.listing.id);
+    analyse(next);
+  };
+
+  const dispatch = async (dest) => {
+    const qty = Number(form.qty);
+    const msg = `Dispatch ${qty.toLocaleString('en-IN')} kg ${titleCase(form.commodity)} from ${analysis.location} to ` +
+      `${dest.destination} by ${dest.transport.trucks}× ${dest.transport.truck_type} truck (freight ₹${dest.transport.cost})?`;
+    if (!window.confirm(msg)) return;
+    setDispatchingTo(dest.destination);
+    try {
+      await initiateShipment({
+        crop: form.commodity, source_region: analysis.location, destination_region: dest.destination,
+        quantity_kg: qty, truck_type: dest.transport.truck_type, listing_id: listingId || undefined,
+        agreed_price_per_kg: dest.expected_price_per_kg, source_price_per_kg: dest.source_price_per_kg,
+      });
+      toast.success(`Shipment to ${dest.destination} initiated`);
+      setListingId(null);
+      refreshShipments();
+      refreshMatches(settings);
+    } catch (err) {
+      toast.error(errorText(err, 'Could not initiate the shipment'));
+    }
+    setDispatchingTo(null);
+  };
+
+  const changeShipment = async (shipment, status) => {
+    setBusyShipment(shipment.id);
+    try {
+      await updateShipmentStatus(shipment.id, status);
+      refreshShipments();
+    } catch (err) {
+      toast.error(errorText(err, 'Status change failed'));
+    }
+    setBusyShipment(null);
+  };
+
+  const saveSettings = async (draft) => {
+    setSavingSettings(true);
+    try {
+      const res = await saveBrokerSettings({
+        home_region: draft.home_region, watch_commodities: draft.watch_commodities,
+        radius_km: draft.radius_km, truck_type: draft.truck_type, truck_rates: draft.truck_rates || {},
+        commission_pct: draft.commission_pct, road_factor: draft.road_factor,
+      });
+      setSettings(res.data.settings);
+      refreshMatches(res.data.settings);
+      toast.success('Settings saved');
+    } catch (err) {
+      toast.error(errorText(err, 'Could not save settings'));
+    }
+    setSavingSettings(false);
+  };
+
+  const field = (key) => ({ value: form[key], onChange: (e) => setForm({ ...form, [key]: e.target.value }) });
+  const breakEvenWeek = analysis && analysis.best_markets && analysis.best_markets.destinations
+    && analysis.best_markets.destinations[0] && analysis.best_markets.destinations[0].break_even
+    ? analysis.best_markets.destinations[0].break_even.target_week : null;
+
   return (
     <div style={s.page}>
-
-      {/* ═══ HEADER ═══ */}
-      <div style={s.header}>
+      <header style={s.header}>
         <div style={s.headerInner}>
-
-          {/* Logo */}
-          <div style={s.headerLeft}>
-            <div style={s.logoBox}>🌿</div>
-            <span style={s.logoText}>
-              ALIP<span style={s.logoDot}>.</span>
-            </span>
-          </div>
-
-          {/* Centre title */}
-          <div style={s.headerMid}>
-            <div style={s.pageTag}>
-              <span style={s.tagLine} />
-              Broker Module
-              <span style={s.tagLine} />
-            </div>
-            <h1 style={s.headerTitle}>📊 Demand Analysis</h1>
-          </div>
-
-          {/* Back button */}
-          <button style={s.backBtn} onClick={() => navigate('/broker')}>
-            ← Back to Dashboard
-          </button>
-
+          <div style={s.logo}>🌿 ALIP<span style={{ color: '#84cc16' }}>.</span></div>
+          <h1 style={s.title}>📊 Demand Analysis</h1>
+          <button style={s.back} onClick={() => navigate('/broker')}>← Dashboard</button>
         </div>
-      </div>
+      </header>
 
-      {/* ═══ BODY ═══ */}
-      <div style={s.body}>
-
-        {/* ── Search card ── */}
-        <div style={s.searchCard}>
-          <div style={s.cardTopStrip} />
-
-          <div style={s.cardTag}>Regional Intelligence</div>
-          <h2 style={s.cardH2}>Analyse Regional Demand</h2>
-          <p style={s.cardSub}>
-            Enter a city or district to view market supply–demand
-            balance, alerts and redistribution options.
+      <main style={s.body}>
+        {/* ── Inputs ── */}
+        <section style={{ ...card, marginBottom: '1rem' }} aria-label="Analyse a commodity">
+          <h2 style={{ margin: '0 0 0.2rem', fontSize: '1.15rem', fontWeight: 900, color: C.ink }}>
+            Where should I sell, and should I sell now?
+          </h2>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.84rem', color: C.muted }}>
+            Enter what you have and where it is. We compare live mandi prices within 500 km, minus truck freight.
           </p>
-
-          <div style={s.searchRow}>
-            <div style={s.inputWrap}>
-              <span style={s.inputIcon}>📍</span>
-              <input
-                style={s.input}
-                placeholder="e.g. Hyderabad, Chennai, Pune…"
-                value={region}
-                onChange={e => setRegion(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-              />
+          <form
+            onSubmit={(e) => { e.preventDefault(); analyse(); }}
+            style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 150px), 1fr))', gap: '0.8rem', alignItems: 'end' }}
+          >
+            <div>
+              <label style={label} htmlFor="commodity">1 · Crop</label>
+              <select id="commodity" style={input} {...field('commodity')}>
+                {commodities.map((c) => <option key={c.id} value={c.id}>{COMMODITY_ICON[c.id] || '🌱'} {c.name}</option>)}
+              </select>
             </div>
-            <button
-              style={{ ...s.searchBtn, opacity: loading ? 0.7 : 1 }}
-              onClick={handleSubmit}
-              disabled={loading}
-            >
-              {loading ? '⏳ Analysing…' : '🔍 Analyse'}
+            <div>
+              <label style={label} htmlFor="location">2 · Where is it now?</label>
+              <input id="location" style={input} list="region-list" placeholder="City or state, e.g. Guntur" {...field('location')} />
+              <datalist id="region-list">{regions.map((r) => <option key={r} value={r} />)}</datalist>
+            </div>
+            <div>
+              <label style={label} htmlFor="qty">3 · Quantity (kg)</label>
+              <input id="qty" style={input} type="number" min="1" placeholder="e.g. 1000" {...field('qty')} />
+            </div>
+            <div>
+              <label style={label} htmlFor="price">4 · You paid (₹/kg)</label>
+              <input id="price" style={input} type="number" min="0" step="0.5" placeholder="e.g. 10" {...field('price')} />
+            </div>
+            <button type="submit" style={{ ...button, opacity: loading ? 0.7 : 1, padding: '0.7rem 1.2rem' }} disabled={loading}>
+              {loading ? 'Analysing…' : 'Analyse'}
             </button>
-          </div>
-
-          {/* Quick city pills */}
-          <div style={s.quickRow}>
-            {['Hyderabad','Chennai','Mumbai','Delhi','Bangalore','Pune','Kolkata'].map(c => (
-              <button key={c} style={s.quickPill} onClick={() => setRegion(c)}>
-                📍 {c}
+          </form>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.4rem', marginTop: '0.8rem' }}>
+            <span style={{ fontSize: '0.74rem', color: C.faint }}>Quick pick:</span>
+            {QUICK_PLACES.filter((p) => !regions.length || regions.includes(p)).map((p) => (
+              <button key={p} type="button" style={ghostButton} onClick={() => setForm({ ...form, location: p })}>
+                📍 {p}
               </button>
             ))}
           </div>
-        </div>
+          <details style={{ marginTop: '0.8rem' }}>
+            <summary style={{ cursor: 'pointer', fontSize: '0.8rem', fontWeight: 700, color: C.green }}>How to use this page</summary>
+            <ol style={{ margin: '0.5rem 0 0', paddingLeft: '1.2rem', fontSize: '0.82rem', color: C.muted, lineHeight: 1.7 }}>
+              <li>Fill all four boxes and press <strong>Analyse</strong>. Quantity and price are needed for the profit comparison.</li>
+              <li>Read <strong>Best place to sell</strong> first, then the <strong>Compare markets</strong> chart: green bars that cross the red line make a profit.</li>
+              <li><strong>Sell now or hold?</strong> uses price trends; it says “Not enough signal” until a few weeks of prices are collected.</li>
+              <li>Press <strong>Dispatch</strong> to book the truck, then track it under <strong>My shipments</strong>.</li>
+              <li>Set your home region in <strong>My trading settings</strong> to get alerts when farmers near you list produce.</li>
+            </ol>
+          </details>
+        </section>
 
-        {/* ── Results ── */}
-        {result && (
-          <>
-            {/* ── Data provenance ── */}
-            {result.is_demo && (
-              <div style={s.demoBanner} role="status">
-                <span style={s.demoIcon}>⚠️</span>
-                <div>
-                  <strong>Demo data — not real market figures.</strong>{' '}
-                  No farmer listings exist in the system yet, so the sample
-                  dataset is shown. Numbers below are illustrative only.
-                </div>
-              </div>
-            )}
-            {result.generated_at && (
-              <div style={s.provenance}>
-                Source: {result.is_demo ? 'demo sample' : 'farmer listings in ALIP'}
-                {' · '}Generated {new Date(result.generated_at).toLocaleString()}
-              </div>
-            )}
-
-            {/* ── Market Alerts ── */}
-            {result.alerts?.length > 0 && (
-              <div style={s.section}>
-                <div style={s.sectionLabel}>
-                  <span style={s.sectionDot} />
-                  Market Alerts
-                  <span style={s.alertCount}>{result.total_alerts}</span>
-                </div>
-
-                <div style={s.alertsGrid}>
-                  {result.alerts.map((alert, idx) => {
-                    const isOver = alert.type === 'oversupply';
-                    return (
-                      <div key={idx} style={{
-                        ...s.alertCard,
-                        borderLeftColor: isOver ? '#ef4444' : '#f59e0b',
-                        background: isOver ? '#fff5f5' : '#fffbf0',
-                      }}>
-                        <div style={s.alertTop}>
-                          <div style={{
-                            ...s.alertIconBox,
-                            background: isOver ? '#fee2e2' : '#fef3c7',
-                          }}>
-                            {isOver ? '📈' : '📉'}
-                          </div>
-                          <span style={{
-                            ...s.alertBadge,
-                            background:  isOver ? '#fee2e2' : '#fef3c7',
-                            color:       isOver ? '#991b1b' : '#92400e',
-                          }}>
-                            {isOver ? 'Oversupply' : 'Undersupply'}
-                          </span>
-                        </div>
-                        <p style={s.alertMsg}>{alert.message}</p>
-                        <div style={{
-                          ...s.alertActionBox,
-                          borderLeftColor: isOver ? '#ef4444' : '#f59e0b',
-                        }}>
-                          <span style={s.actionLabel}>💡 Action</span>
-                          <span style={s.actionText}>{alert.action}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ── Market Balance ── */}
-            <div style={s.section}>
-              <div style={s.sectionLabel}>
-                <span style={s.sectionDot} />
-                Market Balance —&nbsp;<strong>{result.region}</strong>
-              </div>
-              <p style={s.balanceNote}>
-                Expected demand is a rough estimate from the crop, season and city profile —
-                it is not yet based on mandi price or arrival data.
-              </p>
-
-              <div style={s.cropsGrid}>
-                {Object.entries(result.crop_analysis || {}).map(([crop, item]) => {
-                  const status = item.market_status;
-                  const badge  = STATUS_BADGE[status] || STATUS_BADGE.balanced;
-                  const ratio  = parseFloat(item.supply_demand_ratio);
-                  const barPct = Math.min(ratio * 50, 100);
-
-                  return (
-                    <div key={crop} style={s.cropCard}>
-                      {/* coloured left border */}
-                      <div style={{ ...s.cropAccent, background: badge.accent }} />
-
-                      {/* Header row */}
-                      <div style={s.cropHeader}>
-                        <div style={s.cropLeft}>
-                          <div style={{
-                            ...s.cropIconBox,
-                            background: badge.iconBg,
-                          }}>
-                            🌾
-                          </div>
-                          <div>
-                            <div style={s.cropName}>
-                              {crop.charAt(0).toUpperCase() + crop.slice(1)}
-                            </div>
-                            {item.description && (
-                              <div style={s.cropDesc}>{item.description}</div>
-                            )}
-                          </div>
-                        </div>
-                        <span style={{ ...s.statusBadge, ...badge.badge }}>
-                          {status}
-                        </span>
-                      </div>
-
-                      {/* Metrics strip */}
-                      <div style={s.metricsRow}>
-                        <div style={s.metricBox}>
-                          <div style={s.metricVal}>{item.current_supply_kg} kg</div>
-                          <div style={s.metricLbl}>Available Supply</div>
-                        </div>
-                        <div style={s.metricDivider} />
-                        <div style={s.metricBox}>
-                          <div style={s.metricVal}>{item.expected_demand_kg} kg</div>
-                          <div style={s.metricLbl}>Expected Demand</div>
-                        </div>
-                        <div style={s.metricDivider} />
-                        <div style={s.metricBox}>
-                          <div style={{ ...s.metricVal, color: badge.accent }}>
-                            {item.supply_demand_ratio}×
-                          </div>
-                          <div style={s.metricLbl}>Supply / Demand</div>
-                        </div>
-                      </div>
-
-                      {/* Ratio progress bar */}
-                      <div style={s.barTrack}>
-                        <div style={{
-                          ...s.barFill,
-                          width: `${barPct}%`,
-                          background: badge.bar,
-                        }} />
-                      </div>
-                      <div style={s.barLabels}>
-                        <span>0×</span><span>Balanced (1×)</span><span>2×</span>
-                      </div>
-
-                      {/* Recommendation */}
-                      <div style={s.recBox}>
-                        <span style={s.recIcon}>💡</span>
-                        <p style={s.recText}>{item.recommendation}</p>
-                      </div>
-
-                      {/* Redistribution */}
-                      {item.redistribution_options?.length > 0 && (
-                        <div style={s.redistSection}>
-                          <div style={s.redistTitle}>Redistribution Options</div>
-                          <div style={s.redistRow}>
-                            {item.redistribution_options.map(opt => (
-                              <div key={opt.region} style={s.redistPill}>
-                                <span style={s.redistArrow}>
-                                  {opt.direction === 'send_to' ? '→' : '←'}
-                                </span>
-                                <span>
-                                  {opt.direction === 'send_to' ? 'Send to' : 'Source from'}{' '}
-                                  <strong>{opt.region}</strong>{' · '}{opt.suggested_quantity_kg} kg
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Price impact */}
-                      {item.price_impact && (
-                        <div style={s.priceBox}>
-                          <span style={s.priceIcon}>📉</span>
-                          <p style={s.priceText}>
-                            Est. price pressure:{' '}
-                            <strong>{item.price_impact.price_drop_pct}% drop</strong>
-                            {' · '}{item.price_impact.recommendation}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-                {Object.keys(result.crop_analysis || {}).length === 0 && (
-                  <div style={s.emptyBox}>
-                    <div style={s.emptyIcon}>📦</div>
-                    <div style={s.emptyTitle}>No crop data available</div>
-                    <div style={s.emptySub}>
-                      {result.message || 'No supply records found for this region.'}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* ── Initial empty state ── */}
-        {!result && !loading && (
-          <div style={s.emptyState}>
-            <div style={s.emptyStateEmoji}>📊</div>
-            <div style={s.emptyStateTitle}>Enter a Region to Begin</div>
-            <p style={s.emptyStateSub}>
-              Type a city or district above to view the supply–demand balance
-              of current farmer listings, alerts and redistribution recommendations.
-            </p>
+        {error && (
+          <div role="alert" style={{ ...card, borderLeft: '5px solid #ef4444', marginBottom: '1rem', color: '#991b1b' }}>
+            {error}
           </div>
         )}
 
-      </div>
+        {loading && !analysis && (
+          <div style={{ display: 'grid', gap: '1rem', marginBottom: '1rem' }} aria-busy="true">
+            <span style={{ position: 'absolute', left: -9999 }}>Loading analysis…</span>
+            {[120, 260, 200].map((h) => <div key={h} style={{ ...card, height: h, ...skeleton }} />)}
+          </div>
+        )}
+
+        {/* ── Analysis ── */}
+        {analysis ? (
+          <div style={{ display: 'grid', gap: '1rem', marginBottom: '1rem', opacity: loading ? 0.55 : 1 }}>
+            <FreshnessBadge freshness={analysis.freshness} />
+            {analysis.best_markets ? (
+              <BestOptionCard result={analysis.best_markets} commodityName={analysis.commodity_name}
+                              onDispatch={dispatch} dispatchingTo={dispatchingTo} />
+            ) : (
+              <div style={{ ...card, borderLeft: '5px solid #93c5fd', color: C.muted, fontSize: '0.88rem' }}>
+                💡 Add a <strong>quantity</strong> and what you <strong>paid per kg</strong> to see the best place to sell after freight.
+              </div>
+            )}
+            <ActionCard action={analysis.action} commodity={analysis.commodity_name} location={analysis.location} />
+            {analysis.best_markets && <MarketCompareChart result={analysis.best_markets} />}
+            <div style={grid}>
+              <FanChart history={history} forecast={analysis.forecast} breakEvenWeek={breakEvenWeek} placeName={analysis.state} />
+              <SignalStrip signal={analysis.signal} stateName={analysis.state} />
+            </div>
+            {analysis.best_markets && !analysis.best_markets.error && (
+              <details style={card}>
+                <summary style={{ cursor: 'pointer', fontWeight: 800, color: C.ink, fontSize: '0.9rem' }}>
+                  Show full breakdown (distance, truck, ROI, break-even for each market)
+                </summary>
+                <div style={{ marginTop: '0.8rem' }}>
+                  <BestMarketsTable result={analysis.best_markets} onDispatch={dispatch} dispatchingTo={dispatchingTo} bare />
+                </div>
+              </details>
+            )}
+            <p style={{ margin: 0, fontSize: '0.78rem', color: C.muted }}>
+              🧑‍🌾 ALIP farmer listings in {analysis.state}: {analysis.listed_supply_in_state.listings} listing(s),{' '}
+              {analysis.listed_supply_in_state.quantity_kg.toLocaleString('en-IN')} kg — supply that has not reached a mandi yet.
+            </p>
+          </div>
+        ) : !loading && !error && (
+          <div style={{ ...card, marginBottom: '1rem', textAlign: 'center', color: C.muted, border: '1.5px dashed #bbf7d0', padding: '2rem 1rem' }}>
+            <div style={{ fontSize: '2rem' }} aria-hidden="true">📊</div>
+            Fill in the four boxes above and press <strong>Analyse</strong> — or click a state in “Prices across states” below.
+          </div>
+        )}
+
+        {/* ── Market-wide ── */}
+        <div style={{ display: 'grid', gap: '1rem' }}>
+          <PressureHeatmap overview={overview} onPick={pickFromHeatmap} defaultCommodity={form.commodity} />
+          <div style={grid}>
+            <MatchesPanel matches={matches} needsSettings={!settings || !settings.home_region} onAnalyse={analyseListing} />
+            <AlertsFeed alerts={alerts} />
+            <ShipmentsPanel shipments={shipments} onChange={changeShipment} busyId={busyShipment} />
+          </div>
+          <SettingsPanel settings={settings} regions={regions} commodities={commodities}
+                         onSave={saveSettings} saving={savingSettings} />
+        </div>
+      </main>
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   STATUS BADGE CONFIG
-═══════════════════════════════════════════════════════════════ */
-const STATUS_BADGE = {
-  oversupply: {
-    accent: '#ef4444',
-    iconBg: '#fee2e2',
-    bar:    'linear-gradient(90deg,#ef4444,#f97316)',
-    badge:  { background: '#fee2e2', color: '#991b1b' },
-  },
-  undersupply: {
-    accent: '#f59e0b',
-    iconBg: '#fef3c7',
-    bar:    'linear-gradient(90deg,#f59e0b,#84cc16)',
-    badge:  { background: '#fef3c7', color: '#92400e' },
-  },
-  balanced: {
-    accent: '#22c55e',
-    iconBg: '#dcfce7',
-    bar:    'linear-gradient(90deg,#22c55e,#16a34a)',
-    badge:  { background: '#dcfce7', color: '#166534' },
-  },
-};
-
-/* ═══════════════════════════════════════════════════════════════
-   STYLES  — clean light mode
-═══════════════════════════════════════════════════════════════ */
 const s = {
-
-  /* PAGE */
-  page: {
-    minHeight: '100vh',
-    background: '#f0f4f0',
-    fontFamily: "'Segoe UI','Outfit',sans-serif",
-    color: '#1a2e1a',
-  },
-
-  /* ── HEADER ── */
+  page: { minHeight: '100vh', background: C.bg, fontFamily: "'Segoe UI','Outfit',sans-serif", color: C.text },
   header: {
-    position: 'sticky', top: 0, zIndex: 100,
-    background: '#ffffff',
-    borderBottom: '1px solid #d1e7d1',
-    boxShadow: '0 2px 12px rgba(34,118,50,0.08)',
+    position: 'sticky', top: 0, zIndex: 100, background: '#fff',
+    borderBottom: '1px solid #d1e7d1', boxShadow: '0 2px 12px rgba(34,118,50,0.08)',
   },
   headerInner: {
-    maxWidth: 1100, margin: '0 auto',
-    padding: '0.9rem 2rem',
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'space-between', gap: '1rem',
+    maxWidth: 1100, margin: '0 auto', padding: '0.8rem 1rem',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.8rem', flexWrap: 'wrap',
   },
-  headerLeft: { display: 'flex', alignItems: 'center', gap: '0.55rem' },
-  logoBox: {
-    width: 34, height: 34, borderRadius: 9,
-    background: 'linear-gradient(135deg,#16a34a,#22c55e)',
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'center', fontSize: '1rem',
+  logo: { fontFamily: 'Georgia,serif', fontSize: '1.2rem', fontWeight: 900, color: C.ink, letterSpacing: '0.06em' },
+  title: { margin: 0, fontSize: 'clamp(1rem,2.2vw,1.3rem)', fontWeight: 800, color: C.ink },
+  back: {
+    background: '#f0fdf4', border: '1.5px solid #bbf7d0', color: '#15803d', borderRadius: 100,
+    padding: '0.4rem 1rem', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer',
   },
-  logoText: {
-    fontFamily: "'Georgia',serif",
-    fontSize: '1.3rem', fontWeight: 900,
-    color: '#14532d', letterSpacing: '0.08em',
-  },
-  logoDot: { color: '#84cc16' },
-
-  headerMid: { textAlign: 'center', flex: 1 },
-  pageTag: {
-    fontSize: '0.6rem', letterSpacing: '0.2em',
-    textTransform: 'uppercase', color: '#16a34a',
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'center', gap: '0.5rem',
-    marginBottom: '0.1rem',
-  },
-  tagLine: {
-    display: 'inline-block', width: 22,
-    height: 1, background: '#16a34a',
-  },
-  headerTitle: {
-    margin: 0, fontSize: 'clamp(1rem,2.2vw,1.35rem)',
-    fontWeight: 800, color: '#14532d',
-  },
-
-  backBtn: {
-    background: '#f0fdf4',
-    border: '1.5px solid #bbf7d0',
-    color: '#15803d', borderRadius: 100,
-    padding: '0.4rem 1rem',
-    fontSize: '0.78rem', fontWeight: 600,
-    cursor: 'pointer', whiteSpace: 'nowrap',
-  },
-
-  /* ── BODY ── */
-  body: {
-    maxWidth: 1100, margin: '0 auto',
-    padding: '2rem 2rem 5rem',
-  },
-
-  /* ── SEARCH CARD ── */
-  searchCard: {
-    background: '#ffffff',
-    border: '1.5px solid #d1e7d1',
-    borderRadius: 20,
-    padding: '2rem 2.5rem',
-    marginBottom: '2rem',
-    boxShadow: '0 4px 24px rgba(34,118,50,0.07)',
-    position: 'relative', overflow: 'hidden',
-  },
-  cardTopStrip: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    height: 4,
-    background: 'linear-gradient(90deg,#16a34a,#84cc16,#22c55e)',
-    borderRadius: '20px 20px 0 0',
-  },
-  cardTag: {
-    fontSize: '0.6rem', letterSpacing: '0.22em',
-    textTransform: 'uppercase', color: '#16a34a',
-    fontWeight: 700, marginBottom: '0.4rem',
-  },
-  cardH2: {
-    margin: '0 0 0.35rem',
-    color: '#14532d',
-    fontSize: 'clamp(1.3rem,3vw,1.9rem)',
-    fontWeight: 900,
-  },
-  cardSub: {
-    color: '#6b7280', fontSize: '0.88rem',
-    lineHeight: 1.65, marginBottom: '1.5rem',
-  },
-
-  searchRow: { display: 'flex', gap: '0.8rem', maxWidth: 580 },
-  inputWrap: {
-    flex: 1, position: 'relative',
-    display: 'flex', alignItems: 'center',
-  },
-  inputIcon: {
-    position: 'absolute', left: '0.85rem',
-    fontSize: '1rem', pointerEvents: 'none',
-  },
-  input: {
-    width: '100%',
-    background: '#f9fafb',
-    border: '1.5px solid #d1fae5',
-    borderRadius: 10,
-    padding: '0.75rem 1rem 0.75rem 2.6rem',
-    color: '#1a2e1a', fontSize: '0.95rem',
-    outline: 'none', fontFamily: 'inherit',
-    transition: 'border-color 0.2s',
-    boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.04)',
-  },
-  searchBtn: {
-    background: 'linear-gradient(135deg,#16a34a,#22c55e)',
-    border: 'none', borderRadius: 10,
-    color: '#fff', fontWeight: 700,
-    fontSize: '0.92rem', padding: '0.75rem 1.8rem',
-    cursor: 'pointer', whiteSpace: 'nowrap',
-    fontFamily: 'inherit',
-    boxShadow: '0 4px 14px rgba(34,197,94,0.3)',
-    transition: 'all 0.25s',
-  },
-
-  quickRow: {
-    display: 'flex', gap: '0.5rem',
-    flexWrap: 'wrap', marginTop: '1.2rem',
-  },
-  quickPill: {
-    background: '#f0fdf4',
-    border: '1px solid #bbf7d0',
-    borderRadius: 100,
-    padding: '0.28rem 0.85rem',
-    fontSize: '0.75rem', color: '#16a34a',
-    cursor: 'pointer', fontFamily: 'inherit',
-    fontWeight: 600, transition: 'all 0.2s',
-  },
-
-  /* ── DATA PROVENANCE ── */
-  demoBanner: {
-    display: 'flex', alignItems: 'flex-start', gap: '0.7rem',
-    background: '#fffbeb',
-    border: '1.5px solid #fcd34d',
-    borderRadius: 12,
-    padding: '0.9rem 1.2rem',
-    marginBottom: '0.8rem',
-    color: '#78350f', fontSize: '0.86rem', lineHeight: 1.6,
-  },
-  demoIcon: { fontSize: '1.1rem', flexShrink: 0 },
-  provenance: {
-    color: '#6b7280', fontSize: '0.75rem',
-    marginBottom: '1.5rem',
-  },
-
-  /* ── SECTION LABEL ── */
-  section: { marginBottom: '2rem' },
-  sectionLabel: {
-    display: 'flex', alignItems: 'center', gap: '0.6rem',
-    fontSize: '0.88rem', fontWeight: 700,
-    color: '#14532d', marginBottom: '1rem',
-  },
-  sectionDot: {
-    width: 8, height: 8, borderRadius: '50%',
-    background: '#22c55e', display: 'inline-block', flexShrink: 0,
-  },
-  alertCount: {
-    background: '#dcfce7', color: '#166534',
-    borderRadius: 100, fontSize: '0.7rem',
-    fontWeight: 700, padding: '0.15rem 0.55rem',
-  },
-  balanceNote: {
-    color: '#6b7280', fontSize: '0.82rem',
-    margin: '-0.4rem 0 1.2rem',
-  },
-
-  /* ── ALERTS GRID ── */
-  alertsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))',
-    gap: '1rem',
-  },
-  alertCard: {
-    background: '#fff',
-    border: '1px solid #e5e7eb',
-    borderLeft: '4px solid #ef4444',
-    borderRadius: 14,
-    padding: '1.2rem 1.4rem',
-    boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
-  },
-  alertTop: {
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: '0.75rem',
-  },
-  alertIconBox: {
-    width: 38, height: 38, borderRadius: 9,
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'center', fontSize: '1.15rem',
-  },
-  alertBadge: {
-    fontSize: '0.64rem', fontWeight: 700,
-    letterSpacing: '0.06em', textTransform: 'uppercase',
-    padding: '0.25rem 0.75rem', borderRadius: 100,
-  },
-  alertMsg: {
-    margin: '0 0 0.75rem',
-    color: '#374151', fontSize: '0.84rem', lineHeight: 1.6,
-  },
-  alertActionBox: {
-    background: '#f9fafb',
-    border: '1px solid #e5e7eb',
-    borderLeft: '3px solid #ef4444',
-    borderRadius: 8,
-    padding: '0.55rem 0.85rem',
-    display: 'flex', gap: '0.5rem',
-    alignItems: 'flex-start',
-  },
-  actionLabel: {
-    color: '#16a34a', fontSize: '0.72rem',
-    fontWeight: 700, whiteSpace: 'nowrap', paddingTop: 1,
-  },
-  actionText: { color: '#6b7280', fontSize: '0.78rem', lineHeight: 1.5 },
-
-  /* ── CROPS GRID ── */
-  cropsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill,minmax(320px,1fr))',
-    gap: '1.2rem',
-  },
-  cropCard: {
-    background: '#ffffff',
-    border: '1px solid #e5e7eb',
-    borderRadius: 18,
-    padding: '1.4rem 1.5rem',
-    position: 'relative',
-    boxShadow: '0 3px 16px rgba(0,0,0,0.06)',
-    overflow: 'hidden',
-  },
-  cropAccent: {
-    position: 'absolute', top: 0, left: 0,
-    width: 4, bottom: 0, borderRadius: '18px 0 0 18px',
-  },
-
-  cropHeader: {
-    display: 'flex', alignItems: 'flex-start',
-    justifyContent: 'space-between', gap: '1rem',
-    marginBottom: '1.1rem', paddingLeft: '0.5rem',
-  },
-  cropLeft: { display: 'flex', alignItems: 'center', gap: '0.75rem' },
-  cropIconBox: {
-    width: 42, height: 42, borderRadius: 11, flexShrink: 0,
-    display: 'flex', alignItems: 'center',
-    justifyContent: 'center', fontSize: '1.3rem',
-  },
-  cropName: {
-    fontSize: '1rem', fontWeight: 800, color: '#14532d',
-  },
-  cropDesc: { fontSize: '0.74rem', color: '#9ca3af', marginTop: 2 },
-  statusBadge: {
-    fontSize: '0.62rem', fontWeight: 700,
-    letterSpacing: '0.06em', textTransform: 'capitalize',
-    padding: '0.28rem 0.8rem', borderRadius: 100, flexShrink: 0,
-  },
-
-  /* Metrics */
-  metricsRow: {
-    display: 'flex', gap: 0,
-    background: '#f9fafb',
-    border: '1px solid #e5e7eb',
-    borderRadius: 12, overflow: 'hidden',
-    marginBottom: '0.9rem',
-  },
-  metricBox: {
-    flex: 1, padding: '0.85rem 1rem', textAlign: 'center',
-  },
-  metricVal: {
-    fontSize: '1.05rem', fontWeight: 900,
-    color: '#14532d', lineHeight: 1, marginBottom: '0.25rem',
-  },
-  metricLbl: {
-    fontSize: '0.58rem', letterSpacing: '0.08em',
-    textTransform: 'uppercase', color: '#9ca3af',
-  },
-  metricDivider: {
-    width: 1, background: '#e5e7eb', flexShrink: 0,
-  },
-
-  /* Ratio bar */
-  barTrack: {
-    height: 6, background: '#e5e7eb',
-    borderRadius: 3, overflow: 'hidden',
-    marginBottom: '0.3rem',
-  },
-  barFill: {
-    height: '100%', borderRadius: 3,
-    transition: 'width 0.6s ease',
-  },
-  barLabels: {
-    display: 'flex', justifyContent: 'space-between',
-    fontSize: '0.6rem', color: '#9ca3af',
-    marginBottom: '1rem',
-  },
-
-  /* Recommendation */
-  recBox: {
-    background: '#f0fdf4',
-    border: '1px solid #bbf7d0',
-    borderRadius: 10,
-    padding: '0.75rem 1rem',
-    display: 'flex', alignItems: 'flex-start',
-    gap: '0.55rem', marginBottom: '0.85rem',
-  },
-  recIcon: { fontSize: '1rem', flexShrink: 0, paddingTop: 1 },
-  recText: {
-    fontSize: '0.8rem', color: '#14532d',
-    lineHeight: 1.6, margin: 0,
-  },
-
-  /* Redistribution */
-  redistSection: { marginBottom: '0.85rem' },
-  redistTitle: {
-    fontSize: '0.68rem', fontWeight: 700,
-    color: '#6b7280', letterSpacing: '0.08em',
-    textTransform: 'uppercase', marginBottom: '0.5rem',
-  },
-  redistRow: { display: 'flex', flexWrap: 'wrap', gap: '0.5rem' },
-  redistPill: {
-    background: '#f0fdf4',
-    border: '1px solid #bbf7d0',
-    borderRadius: 8,
-    padding: '0.38rem 0.85rem',
-    fontSize: '0.76rem', color: '#15803d',
-    display: 'flex', alignItems: 'center', gap: '0.4rem',
-  },
-  redistArrow: { fontWeight: 900, fontSize: '0.9rem', color: '#16a34a' },
-
-  /* Price impact */
-  priceBox: {
-    background: '#fffbeb',
-    border: '1px solid #fde68a',
-    borderLeft: '3px solid #f59e0b',
-    borderRadius: 10,
-    padding: '0.7rem 1rem',
-    display: 'flex', alignItems: 'flex-start', gap: '0.55rem',
-  },
-  priceIcon: { fontSize: '0.95rem', flexShrink: 0, paddingTop: 1 },
-  priceText: {
-    fontSize: '0.78rem', color: '#92400e',
-    lineHeight: 1.6, margin: 0,
-  },
-
-  /* Empty states */
-  emptyBox: {
-    gridColumn: '1 / -1', textAlign: 'center',
-    background: '#fff', border: '1px solid #e5e7eb',
-    borderRadius: 18,
-    padding: '3rem 2rem',
-    boxShadow: '0 2px 10px rgba(0,0,0,0.04)',
-  },
-  emptyIcon:  { fontSize: '2.8rem', marginBottom: '0.7rem', opacity: 0.4 },
-  emptyTitle: { fontSize: '1rem', fontWeight: 700, color: '#374151', marginBottom: '0.3rem' },
-  emptySub:   { color: '#9ca3af', fontSize: '0.84rem' },
-
-  emptyState: {
-    background: '#fff',
-    border: '1.5px dashed #bbf7d0',
-    borderRadius: 20,
-    padding: '4rem 2rem', textAlign: 'center',
-    boxShadow: '0 2px 12px rgba(34,197,94,0.06)',
-  },
-  emptyStateEmoji: { fontSize: '4rem', marginBottom: '1rem', opacity: 0.45 },
-  emptyStateTitle: {
-    fontSize: '1.3rem', fontWeight: 800,
-    color: '#14532d', marginBottom: '0.5rem',
-  },
-  emptyStateSub: {
-    color: '#6b7280', fontSize: '0.88rem', lineHeight: 1.7,
-  },
+  body: { maxWidth: 1100, margin: '0 auto', padding: '1.2rem 1rem 4rem', boxSizing: 'border-box' },
 };

@@ -77,11 +77,6 @@ export const getRegionalSupply = (region) =>
 export const getAllRegionalSupply = () =>
   api.get('/market/supply');
 
-export const getDemandAnalysis = (region, crop = null) =>
-  api.get(`/market/demand/${encodeURIComponent(region.trim())}`, {
-    params: crop ? { crop } : {},
-  });
-
 export const getMarketSummary = () =>
   api.get('/market/summary');
 
@@ -103,10 +98,48 @@ export const getRegionDistance = (region1, region2) =>
     `/market/regions/distance/${encodeURIComponent(region1)}/${encodeURIComponent(region2)}`
   );
 
-export const getRegionalDemandEstimate = (region, crop) =>
-  api.get(
-    `/market/demand/threshold/${encodeURIComponent(region)}/${encodeURIComponent(crop)}`
-  );
+// ─── Demand Analysis (mandi data, signals, forecasts, decisions) ──
+export const getPriceCommodities = () =>
+  api.get('/market/prices/commodities');
+
+export const getPriceHistory = (commodity, { state, marketKey, weeks = 26 } = {}) =>
+  api.get('/market/prices/history', {
+    params: { commodity, state: state || undefined, market_key: marketKey || undefined, weeks },
+  });
+
+export const getDemandOverview = (level = 'state', { state, commodities } = {}) =>
+  api.get('/market/demand/overview', {
+    params: { level, state: state || undefined, commodities: commodities || undefined },
+  });
+
+export const getCommodityAnalysis = (commodity, location, { qtyKg, pricePerKg } = {}) =>
+  api.get(`/market/demand/analysis/${encodeURIComponent(commodity)}`, {
+    params: { location, qty_kg: qtyKg || undefined, price_per_kg: pricePerKg || undefined },
+  });
+
+export const getDemandAlerts = (limit = 20) =>
+  api.get('/market/demand/alerts', { params: { limit } });
+
+export const getBrokerSettings = () =>
+  api.get('/market/demand/settings');
+
+export const saveBrokerSettings = (settings) =>
+  api.put('/market/demand/settings', settings);
+
+export const getListingMatches = (commodity = null) =>
+  api.get('/market/demand/matches', { params: commodity ? { commodity } : {} });
+
+export const initiateShipment = (data) =>
+  api.post('/market/demand/initiate-shipment', data);
+
+export const getShipments = () =>
+  api.get('/market/demand/shipments');
+
+export const updateShipmentStatus = (id, status) =>
+  api.post(`/market/demand/shipments/${encodeURIComponent(id)}/status`, { status });
+
+export const getDataHealth = () =>
+  api.get('/health/data');
 
 export default api;
 export const getNotifications = () =>

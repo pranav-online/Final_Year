@@ -335,6 +335,58 @@ async def notify_brokers_of_listing(store, listing: dict) -> int:
     return created
 
 
+# ─── Action card ───────────────────────────────────────────
+ACTION_BAND = 0.02  # forecast moves within +-2% read as "no clear direction"
+ACTION_WINDOW = {1: "1-2 days", 2: "5 days", 3: "14 days"}  # report section 2.5 tiers
+
+
+def _rs(value: float) -> str:
+    return f"Rs {value:,.0f}"
+
+
+def action_card(commodity: str, signal: dict = None, forecast_doc: dict = None) -> dict:
+    """
+    SELL / HOLD / WATCH with a plain reason and a confidence label.
+    Forecast-based when a forecast is served, else from descriptive signals (low
+    confidence), else "not enough signal".
+    """
+    tier = COMMODITIES[commodity]["tier"]
+    card = {"action_window": ACTION_WINDOW[tier], "tier": tier,
+            "urgency": (signal or {}).get("urgency"), "range_text": None}
+    h1 = _h((forecast_doc or {}).get("horizons"), 1)
+    if forecast_doc and forecast_doc.get("confidence") not in (None, "insufficient") and h1:
+        base = forecast_doc["origin_price"]
+        change, low, high = h1["p50"] / base - 1, h1["p10"] / base - 1, h1["p90"] / base - 1
+        if change < -ACTION_BAND:
+            action, reason = "SELL", f"Price likely to fall next week (median {change:+.0%}, range {low:+.0%} to {high:+.0%})."
+        elif change > ACTION_BAND:
+            action, reason = "HOLD", f"Price likely to rise next week (median {change:+.0%}, range {low:+.0%} to {high:+.0%})."
+        else:
+            action, reason = "WATCH", f"Price expected to stay within +-{ACTION_BAND:.0%} next week."
+        card.update(action=action, reason=reason, confidence=forecast_doc["confidence"], basis="forecast",
+                    range_text=(f"8 in 10 times next week's price lands between {_rs(h1['p10'])} and "
+                                f"{_rs(h1['p90'])} per quintal."))
+        return card
+
+    quadrant = (signal or {}).get("quadrant")
+    if signal and quadrant not in (None, "insufficient_data"):
+        reasons = "; ".join(signal.get("urgency_reasons") or []) or quadrant.replace("_", " ")
+        if quadrant in {"glut", "weak_demand"} or (signal.get("urgency") or 0) >= 7:
+            action, reason = "SELL", f"Market under pressure: {reasons}."
+        elif quadrant in {"supply_shortage", "strong_demand"}:
+            action, reason = "HOLD", f"Supply is tight ({quadrant.replace('_', ' ')}); prices are firm."
+        else:
+            action, reason = "WATCH", "Arrivals and prices are close to normal."
+        card.update(action=action, reason=reason + " No forecast yet, so this is based on recent signals only.",
+                    confidence="low", basis="signals")
+        return card
+
+    weeks = (signal or {}).get("weeks_of_history", 0)
+    card.update(action="WATCH", confidence="insufficient", basis="none",
+                reason=f"Not enough signal yet: {weeks} week(s) of price history for this area.")
+    return card
+
+
 # ─── Full analysis ─────────────────────────────────────────
 async def analysis(store, commodity: str, location: str, quantity_kg: float = None,
                    price_per_kg: float = None, settings: dict = None, listings: list[dict] = None) -> dict:
@@ -355,6 +407,19 @@ async def analysis(store, commodity: str, location: str, quantity_kg: float = No
         except DecisionError as exc:
             destinations = {"error": str(exc)}
 
+    last_pull = next((r for r in await store.recent_ingest_reports("datagov", 10)
+                      if r.get("status") in {"ok", "warning"}), None)
+    hours = None
+    if last_pull and last_pull.get("finished_at"):
+        hours = (datetime.now(timezone.utc) - datetime.fromisoformat(last_pull["finished_at"])).total_seconds() / 3600
+    freshness = {
+        "last_price_pull_at": last_pull.get("finished_at") if last_pull else None,
+        "hours_since_pull": round(hours, 1) if hours is not None else None,
+        "price_week": (signal or {}).get("week_start"),
+        "markets_reporting": (signal or {}).get("markets_reporting"),
+        "stale": hours is None or hours > 36,
+    }
+
     listings = listings or []
     local = [l for l in listings if listing_commodity(l) == commodity
              and _same_state(l.get("location"), skey)]
@@ -362,6 +427,8 @@ async def analysis(store, commodity: str, location: str, quantity_kg: float = No
     return {
         "commodity": commodity, "commodity_name": COMMODITIES[commodity]["name"],
         "tier": COMMODITIES[commodity]["tier"], "location": place["city"], "state": place["state"],
+        "action": action_card(commodity, signal, forecast_doc),
+        "freshness": freshness,
         "signal": signal, "national_signal": national,
         "forecast": forecast_doc,
         "seasonal_context": {
