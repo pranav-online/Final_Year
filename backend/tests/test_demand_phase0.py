@@ -136,8 +136,12 @@ def test_guntur_and_delhi_are_resolvable():
     assert haversine_km("delhi", "jaipur") is not None
 
 
-# ─── Model path does not depend on the working directory ───
+# ─── The synthetic 56-row regressor is gone (phase 3) ──────
 
-def test_demand_model_path_is_absolute():
-    assert os.path.isabs(demand_ml_service.MODEL_PATH)
-    assert os.path.dirname(demand_ml_service.MODEL_PATH).endswith(os.path.join("backend", "data"))
+def test_legacy_threshold_is_labelled_placeholder_not_ml():
+    result = demand_ml_service.predict_dynamic_threshold(crop="tomato")
+    assert result["threshold_type"] == "configured-static"
+    assert "placeholder" in result["model"].lower()
+    assert not hasattr(demand_ml_service, "X_TRAIN")
+    backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    assert not os.path.exists(os.path.join(backend, "data", "demand_model.pkl"))

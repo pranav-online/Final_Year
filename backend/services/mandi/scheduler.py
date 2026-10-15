@@ -14,17 +14,31 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from services.mandi import config, ingest, insights
+from services.mandi import config, forecast, ingest, insights
 from services.mandi.store import get_store
 
 log = logging.getLogger("alip.mandi.scheduler")
 
 _scheduler: AsyncIOScheduler = None
 
+async def _retrain() -> dict:
+    store = await get_store()
+    result = await forecast.train_and_evaluate(store)
+    await forecast.run_forecasts(store)  # refresh served forecasts with the new decision
+    return {"status": "promoted" if result["promoted"] else "not_promoted"}
+
+
+async def _forecast() -> dict:
+    result = await forecast.run_forecasts(await get_store())
+    return {"status": "ok", **result}
+
+
 JOBS = {
     "ingest_prices": ingest.ingest_prices,
     "ingest_arrivals": ingest.ingest_arrivals,
     "seed_masters": ingest.seed_masters,
+    "forecast_nightly": _forecast,
+    "retrain_weekly": _retrain,
 }
 
 
@@ -67,6 +81,8 @@ def build_scheduler() -> AsyncIOScheduler:
                           id=f"ingest_prices_{hour:02d}{minute:02d}")
     scheduler.add_job(run_job, CronTrigger(hour=16, minute=30), args=["ingest_arrivals"], id="ingest_arrivals_1630")
     scheduler.add_job(run_job, CronTrigger(day_of_week="sun", hour=3, minute=0), args=["seed_masters"], id="seed_masters_weekly")
+    scheduler.add_job(run_job, CronTrigger(hour=23, minute=45), args=["forecast_nightly"], id="forecast_nightly_2345")
+    scheduler.add_job(run_job, CronTrigger(day_of_week="sun", hour=2, minute=0), args=["retrain_weekly"], id="retrain_weekly")
     first_run = datetime.now(ZoneInfo(config.SCHEDULER_TIMEZONE)) + timedelta(seconds=60)
     scheduler.add_job(startup_catch_up, DateTrigger(run_date=first_run), id="startup_catch_up")
     return scheduler

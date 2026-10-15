@@ -7,9 +7,11 @@ Run mandi data jobs by hand (from the backend/ folder, with the venv active):
     python mandi_cli.py backfill --from 2018-01-01 [--commodity onion] [--state Maharashtra]
     python mandi_cli.py ceda-probe              # does CEDA expose market-level arrivals?
     python mandi_cli.py signals                 # recompute signals and raise alerts now
+    python mandi_cli.py train                   # backtest, train, promote only if the gate passes
+    python mandi_cli.py forecast                # write P10/P50/P90 forecasts with the promoted model
     python mandi_cli.py health                  # same payload as GET /health/data
-    python mandi_cli.py schedule                # run only the daily ingestion scheduler
-                                                # (light: no ML models; Ctrl+C to stop)
+    python mandi_cli.py schedule                # run only the mandi scheduler (ingest, signals,
+                                                # forecasts) without the API's PyTorch models; Ctrl+C to stop
 """
 import argparse
 import asyncio
@@ -52,6 +54,14 @@ async def main(args) -> dict:
     if args.job == "signals":
         from services.mandi import insights
         return await insights.refresh(store)
+    if args.job == "train":
+        from services.mandi import forecast
+        result = await forecast.train_and_evaluate(store)
+        await forecast.run_forecasts(store)
+        return result
+    if args.job == "forecast":
+        from services.mandi import forecast
+        return await forecast.run_forecasts(store)
     if args.job == "schedule":
         return await run_scheduler_forever()
     return await data_health(store)
@@ -72,7 +82,7 @@ async def run_scheduler_forever() -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ALIP mandi data jobs")
-    parser.add_argument("job", choices=["masters", "prices", "arrivals", "backfill", "ceda-probe", "signals", "health", "schedule"])
+    parser.add_argument("job", choices=["masters", "prices", "arrivals", "backfill", "ceda-probe", "signals", "train", "forecast", "health", "schedule"])
     parser.add_argument("--commodity", nargs="*", help="limit to these commodities")
     parser.add_argument("--state", nargs="*", help="backfill states (default: the app's home states)")
     parser.add_argument("--from", dest="from_date", default="2018-01-01")

@@ -87,8 +87,16 @@ class MandiStore:
     async def add_ingest_report(self, doc: dict) -> None: ...
     async def recent_ingest_reports(self, source: str = None, limit: int = 10) -> list[dict]: ...
     async def weekly_market_medians(self, commodity: str, date_from: str) -> list[dict]: ...
-    async def replace_signals(self, commodity: str, docs: list[dict]) -> None: ...
-    async def find_signals(self, commodity: str = None, level: str = None) -> list[dict]: ...
+    async def replace_scoped(self, kind: str, commodity: str, docs: list[dict]) -> None: ...
+    async def find_scoped(self, kind: str, commodity: str = None, level: str = None,
+                          scope_key: str = None) -> list[dict]: ...
+
+    # Signals and forecasts are both per-scope documents keyed by commodity.
+    async def replace_signals(self, commodity: str, docs: list[dict]) -> None:
+        await self.replace_scoped("signals", commodity, docs)
+
+    async def find_signals(self, commodity: str = None, level: str = None) -> list[dict]:
+        return await self.find_scoped("signals", commodity, level)
     async def insert_alert_if_new(self, alert: dict, window_hours: int = 24) -> bool: ...
     async def find_alerts(self, since: str = None, commodity: str = None, limit: int = 200) -> list[dict]: ...
 
@@ -132,9 +140,12 @@ class SqliteMandiStore(MandiStore):
                 CREATE TABLE IF NOT EXISTS ingest_reports (
                     run_id TEXT PRIMARY KEY, source TEXT, started_at TEXT, doc TEXT
                 );
-                CREATE TABLE IF NOT EXISTS signals (
-                    id TEXT PRIMARY KEY, commodity TEXT NOT NULL, level TEXT, doc TEXT
+                CREATE TABLE IF NOT EXISTS scoped_docs (
+                    kind TEXT NOT NULL, id TEXT NOT NULL, commodity TEXT NOT NULL, level TEXT,
+                    scope_key TEXT, doc TEXT, PRIMARY KEY (kind, id)
                 );
+                CREATE INDEX IF NOT EXISTS ix_scoped_lookup ON scoped_docs(kind, commodity, level);
+                DROP TABLE IF EXISTS signals;
                 CREATE TABLE IF NOT EXISTS alerts (
                     id TEXT PRIMARY KEY, dedupe_key TEXT, commodity TEXT, created_at TEXT, doc TEXT
                 );
@@ -329,27 +340,26 @@ class SqliteMandiStore(MandiStore):
     async def weekly_market_medians(self, commodity, date_from):
         return await self._run(self._weekly_market_medians, commodity, date_from)
 
-    def _replace_signals(self, commodity, docs):
+    def _replace_scoped(self, kind, commodity, docs):
         with self._conn:
-            self._conn.execute("DELETE FROM signals WHERE commodity = ?", (commodity,))
+            self._conn.execute("DELETE FROM scoped_docs WHERE kind = ? AND commodity = ?", (kind, commodity))
             self._conn.executemany(
-                "INSERT INTO signals (id, commodity, level, doc) VALUES (?,?,?,?)",
-                [(d["_id"], d["commodity"], d["level"], json.dumps(d)) for d in docs],
+                "INSERT INTO scoped_docs (kind, id, commodity, level, scope_key, doc) VALUES (?,?,?,?,?,?)",
+                [(kind, d["_id"], d["commodity"], d["level"], d.get("scope_key"), json.dumps(d)) for d in docs],
             )
 
-    async def replace_signals(self, commodity, docs):
-        await self._run(self._replace_signals, commodity, docs)
+    async def replace_scoped(self, kind, commodity, docs):
+        await self._run(self._replace_scoped, kind, commodity, docs)
 
-    def _find_signals(self, commodity, level):
-        sql, args = "SELECT doc FROM signals WHERE 1=1", []
-        if commodity:
-            sql += " AND commodity = ?"; args.append(commodity)
-        if level:
-            sql += " AND level = ?"; args.append(level)
+    def _find_scoped(self, kind, commodity, level, scope_key):
+        sql, args = "SELECT doc FROM scoped_docs WHERE kind = ?", [kind]
+        for column, value in (("commodity", commodity), ("level", level), ("scope_key", scope_key)):
+            if value:
+                sql += f" AND {column} = ?"; args.append(value)
         return [json.loads(r[0]) for r in self._conn.execute(sql, args)]
 
-    async def find_signals(self, commodity=None, level=None):
-        return await self._run(self._find_signals, commodity, level)
+    async def find_scoped(self, kind, commodity=None, level=None, scope_key=None):
+        return await self._run(self._find_scoped, kind, commodity, level, scope_key)
 
     def _insert_alert_if_new(self, alert, window_hours):
         recent = self._conn.execute(
@@ -391,7 +401,7 @@ class MongoMandiStore(MandiStore):
         self.arrivals = db["mandi_arrivals"]
         self.masters = db["mandi_masters"]
         self.reports = db["mandi_ingest_reports"]
-        self.signals = db["mandi_signals"]
+        self._db = db
         self.alerts = db["mandi_alerts"]
         self._indexed = False
 
@@ -520,14 +530,15 @@ class MongoMandiStore(MandiStore):
             agg.add(row)
         return agg.finish()
 
-    async def replace_signals(self, commodity, docs):
-        await self.signals.delete_many({"commodity": commodity})
+    async def replace_scoped(self, kind, commodity, docs):
+        collection = self._db[f"mandi_{kind}"]
+        await collection.delete_many({"commodity": commodity})
         if docs:
-            await self.signals.insert_many([dict(d) for d in docs])
+            await collection.insert_many([dict(d) for d in docs])
 
-    async def find_signals(self, commodity=None, level=None):
-        query = {k: v for k, v in (("commodity", commodity), ("level", level)) if v}
-        return [doc async for doc in self.signals.find(query)]
+    async def find_scoped(self, kind, commodity=None, level=None, scope_key=None):
+        query = {k: v for k, v in (("commodity", commodity), ("level", level), ("scope_key", scope_key)) if v}
+        return [doc async for doc in self._db[f"mandi_{kind}"].find(query)]
 
     async def insert_alert_if_new(self, alert, window_hours=24):
         recent = await self.alerts.find_one({

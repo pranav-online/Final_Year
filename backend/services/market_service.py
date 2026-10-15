@@ -12,7 +12,6 @@ from services.demand_analysis import (
     normalize_key,
 )
 from services.demand_ml_service import (
-    CROP_MAP,
     predict_dynamic_threshold,
     estimate_price_impact,
 )
@@ -176,12 +175,6 @@ async def _save_alert_history(signals: list) -> None:
 
 def _estimate_expected_demand(region: str, crop: str) -> dict:
     crop_key = normalize_key(crop)
-    if crop_key not in CROP_MAP or crop_key == "default":
-        return {
-            "expected_demand_kg": get_demand_threshold(crop_key),
-            "model": "Configured crop threshold",
-        }
-
     info = get_region_info(region) or {}
     try:
         prediction = predict_dynamic_threshold(

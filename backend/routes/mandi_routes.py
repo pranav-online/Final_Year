@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config.auth_deps import require_role
 from services.mandi.analytics import data_health, list_markets, weekly_price_history
-from services.mandi.config import COMMODITIES, resolve_commodity
+from services.mandi.config import COMMODITIES, resolve_commodity, state_key
+from services.mandi.forecast import promoted_version
 from services.mandi.insights import overview
 from services.mandi.scheduler import scheduler_status
 from services.mandi.store import get_store
@@ -67,6 +68,46 @@ async def demand_alerts(since: str = None, commodity: str = None, limit: int = Q
     for alert in alerts:
         alert["id"] = str(alert.pop("_id", ""))
     return {"success": True, "total": len(alerts), "alerts": alerts}
+
+
+@router.get("/market/demand/forecast/{commodity}", dependencies=[Depends(require_role("broker"))])
+async def demand_forecast(
+    commodity: str,
+    level: str = Query("national", pattern="^(national|state|market)$"),
+    scope: str = Query(None, description="state name or market_key; omit for India"),
+):
+    """P10/P50/P90 at 1, 2 and 4 weeks, or 'Not enough signal' when the series failed the backtest."""
+    cid = _commodity_or_404(commodity)
+    if level == "national":
+        scope_key = "india"
+    elif not scope:
+        raise HTTPException(status_code=422, detail=f"'scope' is required for level={level}")
+    else:
+        scope_key = state_key(scope) if level == "state" else scope.strip().lower()
+
+    docs = await (await get_store()).find_scoped("forecasts", cid, level, scope_key)
+    if not docs:
+        raise HTTPException(status_code=404, detail=f"No forecast for {cid} at {level} '{scope_key}' yet")
+    doc = docs[0]
+    doc.pop("_id", None)
+    doc["display"] = (
+        "Not enough signal" if doc["confidence"] == "insufficient"
+        else "8 in 10 times the price lands between P10 and P90"
+    )
+    return {"success": True, "is_demo": False, **doc}
+
+
+@router.get("/market/demand/model", dependencies=[Depends(require_role("broker"))])
+async def forecast_model():
+    """Model registry: latest training run, its backtest and promotion decision, and the version in use."""
+    store = await get_store()
+    registry = sorted(await store.get_master("model_registry"), key=lambda r: r["_id"])
+    return {
+        "success": True,
+        "in_use": await promoted_version(store),
+        "latest_run": registry[-1] if registry else None,
+        "runs": len(registry),
+    }
 
 
 @router.get("/market/prices/markets", dependencies=[Depends(require_role("broker"))])

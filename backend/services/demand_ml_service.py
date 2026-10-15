@@ -1,215 +1,48 @@
 """
-ALIP - Dynamic ML Demand Prediction Service
-Replaces static hardcoded thresholds with
-ML-predicted dynamic demand thresholds.
-Algorithm: Gradient Boosting Regressor
+ALIP - legacy demand helpers for the /market/demand/{region} view.
+
+The former "dynamic threshold" GradientBoostingRegressor was trained on 56
+hand-typed rows with no data source and no evaluation; it was removed in the
+demand-analysis redesign (phase 3). Real signals and forecasts now come from
+services/mandi. Until the legacy view is replaced (phase 4), the expected
+demand it shows is the configured per-crop threshold, labelled as such.
 """
 
-try:
-    import numpy as np
-except Exception:  # pragma: no cover - optional dependency during startup
-    np = None
+import datetime
 
-try:
-    from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.model_selection import cross_val_score
-except Exception:  # pragma: no cover - optional dependency during startup
-    GradientBoostingRegressor = None
-    cross_val_score = None
+import numpy as np
 
-import joblib, os, datetime
+from services.demand_analysis import get_demand_threshold
 
-# Resolve relative to backend/ so the server can be started from any directory
-# without retraining or writing a stray pickle into the current folder.
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-
-# ─── Encodings ─────────────────────────────────────────
-CROP_MAP    = {"rice":0,"wheat":1,"maize":2,"cotton":3,
-               "sugarcane":4,"groundnut":5,"soybean":6,
-               "default":7}
-SEASON_MAP  = {"kharif":0,"rabi":1,"zaid":2}
-RTYPE_MAP   = {"urban":0,"semi-urban":1,"rural":2}
-MSIZE_MAP   = {"large":2,"medium":1,"small":0}
 SEASON_MONTHS = {
     1:"rabi", 2:"rabi", 3:"rabi",  4:"zaid",
     5:"zaid", 6:"kharif",7:"kharif",8:"kharif",
     9:"kharif",10:"kharif",11:"rabi",12:"rabi"
 }
 
-# ─── Training Data ─────────────────────────────────────
-# Features: [crop, season, region_type,
-#            population_density, market_size, month]
-# Target:   demand_threshold_kg
 
-X_TRAIN = [
-    # rice - kharif - urban - high density
-    [0,0,0,18480,2,7],[0,0,0,10100,2,7],
-    [0,0,0,26903,2,7],[0,0,0,20667,2,8],
-    [0,0,0,24252,2,8],[0,0,0,8000,2,7],
-    # rice - kharif - semi-urban
-    [0,0,1,3100,1,7],[0,0,1,4600,1,8],
-    [0,0,1,3900,1,7],[0,0,1,2900,1,8],
-    [0,0,1,2700,1,7],[0,0,1,2100,1,8],
-    # rice - rabi - urban
-    [0,1,0,18480,2,11],[0,1,0,10100,2,12],
-    [0,1,0,6900,2,11],[0,1,0,9800,2,12],
-    # rice - rabi - semi-urban
-    [0,1,1,3100,1,11],[0,1,1,2700,1,12],
-    # wheat - rabi - urban
-    [1,1,0,8000,2,11],[1,1,0,6400,2,12],
-    [1,1,0,5200,2,1],[1,1,0,6900,2,11],
-    [1,1,0,3400,2,12],[1,1,0,9800,2,11],
-    # wheat - rabi - semi-urban
-    [1,1,1,3400,1,12],[1,1,1,2400,1,1],
-    [1,1,1,3100,1,11],[1,1,1,2700,1,12],
-    # maize - kharif - urban
-    [2,0,0,18480,2,7],[2,0,0,4378,2,6],
-    [2,0,0,7200,2,7],[2,0,0,9800,2,6],
-    # maize - kharif - semi-urban
-    [2,0,1,3100,1,7],[2,0,1,4600,1,8],
-    [2,0,1,2900,1,7],[2,0,1,2700,1,6],
-    # cotton - kharif - urban
-    [3,0,0,9800,2,7],[3,0,0,18480,2,6],
-    [3,0,0,7200,2,7],[3,0,0,4600,2,8],
-    # cotton - kharif - semi-urban
-    [3,0,1,4600,1,7],[3,0,1,2800,1,8],
-    # cotton - rural
-    [3,0,2,1750,0,7],[3,0,2,2100,0,8],
-    # sugarcane - kharif - urban
-    [4,0,0,11800,2,6],[4,0,0,10100,2,7],
-    [4,0,0,7200,2,8],[4,0,0,18480,2,6],
-    # groundnut - kharif
-    [5,0,1,3600,1,7],[5,0,1,1750,0,6],
-    [5,0,0,9800,2,7],[5,0,1,4600,1,8],
-    # soybean - kharif
-    [6,0,1,2700,1,7],[6,0,1,3400,1,6],
-    [6,0,0,5200,2,7],[6,0,1,2100,1,8],
-]
-
-Y_TRAIN = [
-    # rice kharif urban
-    820,650,1100,950,980,700,
-    # rice kharif semi-urban
-    380,420,360,310,290,250,
-    # rice rabi urban
-    580,460,420,500,
-    # rice rabi semi-urban
-    280,250,
-    # wheat rabi urban
-    720,580,490,610,460,680,
-    # wheat rabi semi-urban
-    320,240,290,260,
-    # maize kharif urban
-    560,380,430,480,
-    # maize kharif semi-urban
-    290,320,280,260,
-    # cotton kharif urban
-    480,520,460,410,
-    # cotton semi-urban
-    280,210,
-    # cotton rural
-    140,160,
-    # sugarcane urban
-    680,590,520,720,
-    # groundnut
-    310,180,420,350,
-    # soybean
-    260,290,380,230,
-]
-
-MODEL_PATH = os.path.join(DATA_DIR, "demand_model.pkl")
-
-# ─── Train Model ───────────────────────────────────────
-def train_demand_model():
-    if np is None or GradientBoostingRegressor is None or cross_val_score is None:
-        raise RuntimeError("Demand prediction ML dependencies are not installed.")
-
-    X = np.array(X_TRAIN)
-    y = np.array(Y_TRAIN)
-    model = GradientBoostingRegressor(
-        n_estimators=100,
-        max_depth=4,
-        learning_rate=0.1,
-        random_state=42
-    )
-    scores = cross_val_score(
-        model, X, y, cv=5, scoring="r2"
-    )
-    print(f"5-Fold CV R²: "
-          f"{scores.mean():.4f} ± {scores.std():.4f}")
-    model.fit(X, y)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    joblib.dump(model, MODEL_PATH)
-    print(f"✅ Model saved → {MODEL_PATH}")
-    return model
-
-def get_demand_model():
-    if np is None or joblib is None:
-        return None
-    if os.path.exists(MODEL_PATH):
-        return joblib.load(MODEL_PATH)
-    return train_demand_model()
-
-try:
-    _model = get_demand_model()
-except Exception as exc:
-    print(f"Demand model unavailable: {exc}")
-    _model = None
-
-# ─── Predict Dynamic Threshold ─────────────────────────
 def predict_dynamic_threshold(
     crop: str,
-    region_type: str,
-    population_density: int,
-    market_size: str,
+    region_type: str = None,
+    population_density: int = None,
+    market_size: str = None,
     month: int = None
 ) -> dict:
-    """
-    Predict dynamic demand threshold using
-    Gradient Boosting Regressor.
-    Replaces static hardcoded thresholds.
-    """
-    if _model is None:
-        return {
-            "crop": crop,
-            "season": SEASON_MONTHS.get(month or datetime.datetime.now().month, "kharif"),
-            "month": month or datetime.datetime.now().month,
-            "region_type": region_type,
-            "population_density": population_density,
-            "market_size": market_size,
-            "predicted_threshold_kg": 500,
-            "threshold_type": "fallback-static",
-            "model": "Static fallback"
-        }
-
-    if month is None:
-        month = datetime.datetime.now().month
-
-    season     = SEASON_MONTHS.get(month, "kharif")
-    crop_enc   = CROP_MAP.get(crop.lower(), 7)
-    season_enc = SEASON_MAP.get(season, 0)
-    rtype_enc  = RTYPE_MAP.get(region_type, 1)
-    msize_enc  = MSIZE_MAP.get(market_size, 1)
-
-    features   = np.array([[
-        crop_enc, season_enc, rtype_enc,
-        population_density, msize_enc, month
-    ]])
-
-    predicted  = max(100.0,
-                     round(float(_model.predict(features)[0])))
-
+    """Configured per-crop threshold (placeholder; no ML model behind it)."""
+    month = month or datetime.datetime.now().month
     return {
-        "crop":                   crop,
-        "season":                 season,
-        "month":                  month,
-        "region_type":            region_type,
-        "population_density":     population_density,
-        "market_size":            market_size,
-        "predicted_threshold_kg": predicted,
-        "threshold_type":         "ML-predicted (dynamic)",
-        "model":                  "Gradient Boosting Regressor"
+        "crop": crop,
+        "season": SEASON_MONTHS.get(month, "kharif"),
+        "month": month,
+        "region_type": region_type,
+        "population_density": population_density,
+        "market_size": market_size,
+        "predicted_threshold_kg": get_demand_threshold(crop),
+        "threshold_type": "configured-static",
+        "model": "Configured crop threshold (placeholder)",
     }
+
+
 # ─── Supply Trend Analysis ─────────────────────────────
 def analyze_supply_trend(
     supply_history: list,
