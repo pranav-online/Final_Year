@@ -11,16 +11,32 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 # Password hashing
-# Use pbkdf2_sha256 as the default because the current environment can have a
-# broken bcrypt backend. Keep bcrypt in the scheme list for compatibility with
-# any older hashes already stored in local JSON data.
-pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
+# Prefer pbkdf2_sha256 for all new hashes because the bcrypt backend can be
+# incompatible with newer Python environments (for example, some passlib/bcrypt
+# combinations crash under Python 3.14). We still support legacy bcrypt hashes by
+# falling back to bcrypt.checkpw() only when needed.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    if not hashed_password:
+        return False
+
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (AttributeError, TypeError, ValueError):
+        if not hashed_password.startswith("$2"):
+            return False
+
+        try:
+            import bcrypt
+            return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+        except Exception:
+            return False
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()

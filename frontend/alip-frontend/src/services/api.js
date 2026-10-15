@@ -46,6 +46,12 @@ export const getWeatherAdvisory = (location, disease = null, severity = null) =>
 export const getCropRecommendation = (data) =>
   api.post('/crop/recommend', data);
 
+export const getSoilProfile = (latitude, longitude) =>
+  api.get('/crop/soil-profile', { params: { latitude, longitude } });
+
+export const reverseGeocode = (latitude, longitude) =>
+  api.get('/crop/reverse-geocode', { params: { latitude, longitude } });
+
 // ─── Market APIs ───────────────────────────────────────────
 export const addCropListing = (data) =>
   api.post('/market/listing/add', data);

@@ -7,7 +7,10 @@ import joblib
 import numpy as np
 import requests
 from dotenv import load_dotenv
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 load_dotenv()
 

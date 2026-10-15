@@ -27,6 +27,12 @@ import re
 import urllib.request
 from data.soil_data import get_soil_data, get_soil_data_source, get_rainfall
 from services.weather_service import get_weather
+from services.geospatial_service import (
+    resolve_coordinates,
+    get_soil_profile_for_coordinates,
+    get_weather_for_coordinates,
+)
+from services.crop_eligibility import assess_crop_eligibility, CROP_AGRONOMIC_SPECS
 
 # ─── Paths ─────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(__file__)
@@ -728,9 +734,13 @@ except Exception as exc:
     label_encoder = None
 
 # ─── Recommend Crop ─────────────────────────────────────────
+# ─── Recommend Crop ─────────────────────────────────────────
 async def recommend_crop(
-    location: str,
-    season: str,
+    location: str | None = None,
+    season: str = "kharif",
+    latitude: float | None = None,
+    longitude: float | None = None,
+    irrigation: str | None = None,
     nitrogen: float | None = None,
     phosphorous: float | None = None,
     potassium: float | None = None,
@@ -740,17 +750,44 @@ async def recommend_crop(
     rainfall: float | None = None,
 ) -> dict:
     try:
-        regional_profile = get_regional_seasonal_crop_profile(location, season)
-        if regional_profile is None and (
-            crop_model is None or label_encoder is None or np is None
-        ):
+        geo_context = None
+        soil_profile_data = None
+        resolved_location_name = location or "Selected Farm Location"
+
+        # 1. Coordinate-based Geospatial Resolution
+        if latitude is not None and longitude is not None:
+            geo_context = resolve_coordinates(latitude, longitude)
+            resolved_location_name = geo_context.get("formatted_address") or f"{geo_context.get('district')}, {geo_context.get('state')}"
+            soil_profile_data = get_soil_profile_for_coordinates(
+                latitude, longitude, geo_context.get("district"), geo_context.get("state")
+            )
+            location_for_rules = geo_context.get("district") or geo_context.get("state") or resolved_location_name
+        else:
+            location_for_rules = location or "default"
+
+        regional_profile = get_regional_seasonal_crop_profile(location_for_rules, season)
+
+        if crop_model is None or label_encoder is None or np is None:
             return {
                 "success": False,
                 "error": "Crop recommendation model dependencies are unavailable."
             }
 
-        # Get soil data for location
-        soil = dict(get_soil_data(location))
+        # 2. Resolve Soil Data & Track Provenance
+        if soil_profile_data:
+            soil = {
+                "soil_type": soil_profile_data["soil_classification"]["soil_type"],
+                "N": next((p["value"] for p in soil_profile_data["properties"] if p["property"] == "nitrogen"), 50),
+                "P": next((p["value"] for p in soil_profile_data["properties"] if p["property"] == "phosphorous"), 25),
+                "K": next((p["value"] for p in soil_profile_data["properties"] if p["property"] == "potassium"), 30),
+                "ph": next((p["value"] for p in soil_profile_data["properties"] if p["property"] == "ph"), 6.8),
+            }
+            soil_source = "isric-soilgrids-250m"
+        else:
+            soil = dict(get_soil_data(location_for_rules))
+            soil_source = get_soil_data_source(location_for_rules)
+
+        # Apply explicit user laboratory/sensor overrides
         soil_overrides = {
             "N": nitrogen,
             "P": phosphorous,
@@ -762,108 +799,129 @@ async def recommend_crop(
             if value is not None
         }
         soil.update(supplied_soil_values)
+
         if len(supplied_soil_values) == len(soil_overrides):
-            soil_source = "user-provided"
+            data_quality = "verified-laboratory"
+            soil_source = "user-provided-laboratory"
         elif supplied_soil_values:
+            data_quality = "mixed-estimates"
             soil_source = "mixed-user-provided"
         else:
-            soil_source = get_soil_data_source(location)
+            data_quality = "geographic-grid-estimate"
 
-        # Get rainfall for season
+        # 3. Resolve Seasonal Rainfall & Weather
         seasonal_rainfall = get_rainfall(season)
+        resolved_rainfall = rainfall if rainfall is not None else seasonal_rainfall
+        rainfall_source = "user-provided" if rainfall is not None else "seasonal-estimate"
 
-        # Use live weather when available; otherwise fall back to defaults.
-        resolved_temperature = None if regional_profile else 28.0
-        resolved_humidity = None if regional_profile else 65.0
+        resolved_temperature = 28.0
+        resolved_humidity = 65.0
         weather_source = "default-values"
         weather_error = None
 
-        if not regional_profile and (temperature is None or humidity is None):
-            weather_result = await get_weather(location)
+        if latitude is not None and longitude is not None:
+            coord_weather = get_weather_for_coordinates(latitude, longitude)
+            if coord_weather.get("success"):
+                resolved_temperature = coord_weather["temperature"]
+                resolved_humidity = coord_weather["humidity"]
+                weather_source = coord_weather["source"]
+        elif temperature is None or humidity is None:
+            weather_result = await get_weather(location_for_rules)
             if weather_result.get("success"):
-                weather = weather_result["weather"]
-                resolved_temperature = float(weather["temperature"])
-                resolved_humidity = float(weather["humidity"])
-                weather_source = weather.get("source", "openweathermap")
+                w = weather_result["weather"]
+                resolved_temperature = float(w["temperature"])
+                resolved_humidity = float(w["humidity"])
+                weather_source = w.get("source", "openweathermap")
             else:
                 weather_error = weather_result.get("error")
 
         if temperature is not None:
             resolved_temperature = temperature
+            weather_source = "user-provided"
         if humidity is not None:
             resolved_humidity = humidity
-        if regional_profile:
-            weather_source = "not-used-for-regional-guidance"
-        elif temperature is not None and humidity is not None:
             weather_source = "user-provided"
-        elif temperature is not None or humidity is not None:
-            weather_source = "mixed-user-provided"
 
-        resolved_rainfall = rainfall if rainfall is not None else seasonal_rainfall
-        rainfall_source = (
-            "user-provided" if rainfall is not None else "seasonal estimate"
-        )
-
-        if regional_profile:
-            recommendations = [
-                {
-                    "crop": crop_name,
-                    "confidence": None,
-                    "recommendation_type": "regional-seasonal",
-                    "description": CROP_INFO.get(
-                        crop_name,
-                        "Common regional crop; check local district and field suitability."
-                    ),
-                }
-                for crop_name in regional_profile["priority_crops"]
-            ]
+        # 4. Machine Learning Multi-Class Inference (Random Forest)
+        feature_cols = ["N", "P", "K", "temperature", "humidity", "ph", "rainfall"]
+        raw_vals = [[
+            float(soil["N"]), float(soil["P"]), float(soil["K"]),
+            float(resolved_temperature), float(resolved_humidity),
+            float(soil["ph"]), float(resolved_rainfall)
+        ]]
+        if pd is not None:
+            input_data = pd.DataFrame(raw_vals, columns=feature_cols)
         else:
-            input_data = np.array([[
-                soil["N"], soil["P"], soil["K"],
-                resolved_temperature, resolved_humidity,
-                soil["ph"], resolved_rainfall
-            ]])
-            probabilities = crop_model.predict_proba(input_data)[0]
-            top_indices = np.argsort(probabilities)[::-1][:3]
-            recommendations = []
-            for idx in top_indices:
-                crop_name = label_encoder.inverse_transform([idx])[0]
-                confidence = round(probabilities[idx] * 100, 2)
-                recommendations.append({
-                    "crop": crop_name,
-                    "confidence": confidence,
-                    "recommendation_type": "model-ranked",
-                    "description": CROP_INFO.get(
-                        crop_name.lower(),
-                        "Suitable for your conditions."
-                    )
-                })
+            input_data = np.array(raw_vals)
+        probabilities = crop_model.predict_proba(input_data)[0]
+
+        # 5. Composite Agronomic Scoring & Explainability
+        # Evaluate all crop classes and rank by combined suitability + ML score
+        candidate_evaluations = []
+        for idx, prob in enumerate(probabilities):
+            crop_name = label_encoder.inverse_transform([idx])[0]
+            ml_confidence = round(prob * 100, 2)
+
+            eligibility = assess_crop_eligibility(
+                crop=crop_name,
+                season=season,
+                temperature=resolved_temperature,
+                rainfall=resolved_rainfall,
+                soil_ph=soil["ph"],
+                soil_type=soil["soil_type"],
+                irrigation=irrigation,
+            )
+
+            # Composite suitability calculation:
+            # Combines model confidence (0-100) with agronomic penalty reduction
+            suitability_score = max(0, min(100, round(ml_confidence * 0.65 + (100 - eligibility["suitability_penalty"]) * 0.35, 1)))
+
+            # If crop is also a recognized priority regional crop, add a small agronomic bonus
+            is_priority = False
+            if regional_profile and crop_name.lower() in [c.lower() for c in regional_profile.get("priority_crops", [])]:
+                suitability_score = min(100, suitability_score + 8)
+                is_priority = True
+                eligibility["reasons"].insert(0, f"Recognized high-yield priority crop for {regional_profile['region']} ({season.capitalize()}).")
+
+            candidate_evaluations.append({
+                "crop": crop_name,
+                "display_name": eligibility.get("display_name", crop_name.capitalize()),
+                "ml_confidence": ml_confidence,
+                "suitability_score": suitability_score,
+                "water_demand": eligibility.get("water_demand", "medium"),
+                "eligible": eligibility["eligible"],
+                "reasons": eligibility["reasons"],
+                "warnings": eligibility["warnings"],
+                "description": CROP_INFO.get(crop_name.lower(), eligibility.get("description", "Suitable crop for current parameters.")),
+                "is_priority_regional": is_priority,
+            })
+
+        # Rank candidates primarily by suitability score, then ML confidence
+        candidate_evaluations.sort(key=lambda x: (x["eligible"], x["suitability_score"], x["ml_confidence"]), reverse=True)
+        top_recommendations = candidate_evaluations[:3]
+
+        # Data provenance notes and missing measurement warnings
+        limitations = [
+            "Soil properties reflect 250m geographic grid-cell predictions (ISRIC SoilGrids & Regional Survey), not an on-site laboratory test.",
+            "Plant-available Phosphorus (P) and Potassium (K) are estimated from regional agricultural averages; test your field soil before chemical fertilizer application."
+        ]
+        if data_quality == "verified-laboratory":
+            limitations = ["Laboratory soil test values supplied. Agronomic recommendation is high confidence."]
 
         return {
             "success": True,
-            "location": location,
+            "location": resolved_location_name,
+            "coordinates": {"latitude": latitude, "longitude": longitude} if (latitude and longitude) else None,
             "season": season,
+            "irrigation": irrigation or "rainfed",
             "soil_type": soil["soil_type"],
-            "top_recommendation": recommendations[0]["crop"],
-            "confidence": recommendations[0]["confidence"],
-            "recommendations": recommendations,
-            "recommendation_method": (
-                "regional-seasonal-guidance" if regional_profile else "soil-climate-model"
-            ),
-            "regional_seasonal_guidance": (
-                {
-                    "region": regional_profile["region"],
-                    "season": regional_profile["season"],
-                    "common_crops": regional_profile["common_crops"],
-                    "not_modelled_crops": regional_profile["not_modelled_crops"],
-                    "recommendation_order_note": (
-                        "These are common regional-seasonal options, not a farm-specific "
-                        "ranking. Choose based on district, irrigation, soil test, and local "
-                        "agronomy advice."
-                    ),
-                }
-                if regional_profile else None
-            ),
+            "data_quality": data_quality,
+            "top_recommendation": top_recommendations[0]["crop"],
+            "confidence": top_recommendations[0]["ml_confidence"],
+            "suitability_score": top_recommendations[0]["suitability_score"],
+            "recommendations": top_recommendations,
+            "recommendation_method": "geospatial-soil-climate-model",
+            "soil_profile": soil_profile_data,
             "soil_source": soil_source,
             "weather_source": weather_source,
             "weather_error": weather_error,
@@ -871,14 +929,16 @@ async def recommend_crop(
             "weather_inputs": {
                 "temperature": resolved_temperature,
                 "humidity": resolved_humidity,
-                "rainfall": resolved_rainfall
+                "rainfall": resolved_rainfall,
             },
             "soil_summary": {
                 "nitrogen": soil["N"],
                 "phosphorous": soil["P"],
                 "potassium": soil["K"],
-                "ph": soil["ph"]
-            }
+                "ph": soil["ph"],
+            },
+            "limitations_and_warnings": limitations,
+            "model_version": "RandomForest-v1.0 (100 trees, 10 depth, 22 classes)",
         }
 
     except Exception as e:
