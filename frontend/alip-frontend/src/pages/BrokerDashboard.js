@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { getMarketSummary } from '../services/api';
+import { getDemandAlerts, getMarketSummary } from '../services/api';
 import toast from 'react-hot-toast';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -20,7 +20,7 @@ const MODULES = [
   {
     icon:  '📊',
     title: 'Demand Analysis',
-    desc:  'Analyse regional crop demand, supply gaps and market alerts',
+    desc:  'Mandi price signals, forecasts, where to sell and shipments',
     path:  '/demand',
     grad:  'linear-gradient(135deg,#7c3aed,#a78bfa)',
     glow:  'rgba(124,58,237,0.28)',
@@ -203,6 +203,7 @@ export default function BrokerDashboard() {
   const navigate         = useNavigate();
   const time             = useClock();
   const [summary,  setSummary]  = useState(null);
+  const [alertCounts, setAlertCounts] = useState({ over: 0, under: 0 });
   const [loading,  setLoading]  = useState(true);
   const [scrolled, setScrolled] = useState(false);
   const [statsVis, setStatsVis] = useState(false);
@@ -232,6 +233,14 @@ export default function BrokerDashboard() {
     } catch {
       toast.error('Failed to load market data!');
     }
+    try {
+      // Report section 2.3: oversupply = glut / arrival surge, undersupply = supply shortage.
+      const alerts = (await getDemandAlerts(200)).data.alerts;
+      setAlertCounts({
+        over: alerts.filter((a) => a.type === 'glut' || a.type === 'arrival_surge').length,
+        under: alerts.filter((a) => a.type === 'supply_shortage').length,
+      });
+    } catch { /* counts stay at 0 */ }
     setLoading(false);
   };
 
@@ -240,12 +249,6 @@ export default function BrokerDashboard() {
     toast.success('Logged out!');
     navigate('/login');
   };
-
-  const cropCount = summary
-    ? Object.keys(
-        Object.values(summary.regional_summary || {}).reduce((a, b) => ({ ...a, ...b }), {})
-      ).length
-    : 0;
 
   return (
     <div style={S.page}>
@@ -323,14 +326,14 @@ export default function BrokerDashboard() {
           {/* Left text */}
           <div style={S.heroLeft}>
             <div style={S.heroBadge}>
-              <span style={S.heroBadgeDot} /> Live Market Data
+              <span style={S.heroBadgeDot} /> Farmer Listing Data
             </div>
             <h1 style={S.heroTitle}>
               Market<br />
               <span style={S.heroTitleGrad}>Overview</span>
             </h1>
             <p style={S.heroSub}>
-              Real-time intelligence on crop supply, demand gaps and
+              Crop supply from farmer listings, demand gaps and
               regional market signals — all in one place.
             </p>
             <button style={S.heroBtn} onClick={() => navigate('/demand')}>
@@ -348,20 +351,20 @@ export default function BrokerDashboard() {
             ) : summary ? (
               <>
                 <StatCard
+                  icon="⚖️" value={Math.round(summary.total_quantity_kg || 0)}
+                  label="Market Volume (kg)" color="#7c3aed" delay={0.1} start={statsVis}
+                />
+                <StatCard
                   icon="📋" value={summary.total_listings}
-                  label="Total Listings" color="#7c3aed" delay={0.1} start={statsVis}
+                  label="Active Listings" color="#0284c7" delay={0.18} start={statsVis}
                 />
                 <StatCard
-                  icon="🗺️" value={summary.regions_active}
-                  label="Active Regions" color="#0284c7" delay={0.18} start={statsVis}
+                  icon="📈" value={alertCounts.over}
+                  label="Oversupply Alerts" color="#dc2626" delay={0.26} start={statsVis}
                 />
                 <StatCard
-                  icon="🌾" value={cropCount}
-                  label="Crop Types" color="#16a34a" delay={0.26} start={statsVis}
-                />
-                <StatCard
-                  icon="📈" value={summary.total_listings > 0 ? Math.round(summary.total_listings * 0.73) : 0}
-                  label="Active Deals" color="#ea580c" delay={0.34} start={statsVis}
+                  icon="📉" value={alertCounts.under}
+                  label="Undersupply Alerts" color="#ea580c" delay={0.34} start={statsVis}
                 />
               </>
             ) : (
@@ -408,7 +411,7 @@ export default function BrokerDashboard() {
             <div style={S.comingSoonIcon}>🚀</div>
             <div style={S.comingSoonTitle}>More coming soon</div>
             <p style={S.comingSoonDesc}>
-              Trade history, price forecasting and farmer messaging
+              Trade history, broker ratings and farmer messaging
               are in development.
             </p>
           </div>

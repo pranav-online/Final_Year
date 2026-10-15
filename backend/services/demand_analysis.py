@@ -1,6 +1,8 @@
 import math
 from datetime import datetime
 
+from services.region_service import REGIONS, STATE_TO_REFERENCE_REGION
+
 
 DEMAND_THRESHOLDS = {
     "rice": 500,
@@ -14,50 +16,9 @@ DEMAND_THRESHOLDS = {
 }
 
 
+# Single source of truth for market locations lives in region_service.REGIONS.
 REGION_COORDINATES = {
-    "hyderabad": (17.3850, 78.4867),
-    "warangal": (17.9689, 79.5941),
-    "nizamabad": (18.6725, 78.0941),
-    "karimnagar": (18.4386, 79.1288),
-    "vijayawada": (16.5062, 80.6480),
-    "visakhapatnam": (17.6868, 83.2185),
-    "chennai": (13.0827, 80.2707),
-    "coimbatore": (11.0168, 76.9558),
-    "madurai": (9.9252, 78.1198),
-    "bangalore": (12.9716, 77.5946),
-    "mysore": (12.2958, 76.6394),
-    "pune": (18.5204, 73.8567),
-    "nagpur": (21.1458, 79.0882),
-    "mumbai": (19.0760, 72.8777),
-    "ludhiana": (30.9010, 75.8573),
-    "amritsar": (31.6340, 74.8723),
-    "lucknow": (26.8467, 80.9462),
-    "varanasi": (25.3176, 82.9739),
-    "kochi": (9.9312, 76.2673),
-    "thiruvananthapuram": (8.5241, 76.9366),
-    "jaipur": (26.9124, 75.7873),
-    "jodhpur": (26.2389, 73.0243),
-    "kolkata": (22.5726, 88.3639),
-    "ahmedabad": (23.0225, 72.5714),
-    "surat": (21.1702, 72.8311),
-    "bhopal": (23.2599, 77.4126),
-    "indore": (22.7196, 75.8577),
-}
-
-
-STATE_TO_REFERENCE_REGION = {
-    "telangana": "hyderabad",
-    "andhra pradesh": "vijayawada",
-    "tamil nadu": "chennai",
-    "karnataka": "bangalore",
-    "maharashtra": "pune",
-    "punjab": "ludhiana",
-    "uttar pradesh": "lucknow",
-    "kerala": "kochi",
-    "rajasthan": "jaipur",
-    "west bengal": "kolkata",
-    "gujarat": "ahmedabad",
-    "madhya pradesh": "bhopal",
+    name.lower(): (data["lat"], data["lng"]) for name, data in REGIONS.items()
 }
 
 

@@ -14,7 +14,6 @@ from routes.disease import detect_disease
 from services import disease_service
 from services import market_service
 from services.market_service import (
-    analyze_demand,
     add_crop_listing,
     get_all_regional_supply,
     get_all_market_alerts,
@@ -46,54 +45,6 @@ async def test_register_works_without_database_config(monkeypatch):
         await auth.register_with_local_store(user)
 
 
-@pytest.mark.asyncio
-async def test_demand_analysis_returns_fallback_signals_when_market_is_empty(monkeypatch):
-    async def fake_load_regional_supply_index(query=None):
-        return {}
-
-    monkeypatch.setattr("services.market_service._load_regional_supply_index", fake_load_regional_supply_index)
-
-    result = await analyze_demand("hyderabad")
-
-    assert result["success"] is True
-    assert result["region"] == "hyderabad"
-    assert result["analysis"]
-    assert result["total_alerts"] >= 0
-    assert result["crop_analysis"]["rice"]["expected_demand_kg"] > 0
-    assert result["crop_analysis"]["rice"]["supply_demand_ratio"] > 0
-
-
-@pytest.mark.asyncio
-async def test_demand_analysis_compares_supply_to_predicted_demand(monkeypatch):
-    async def fake_load_regional_supply_index(query=None):
-        return {
-            "hyderabad": {"rice": 1400},
-            "warangal": {"rice": 100},
-        }
-
-    async def no_alert_history(signals):
-        return None
-
-    monkeypatch.setattr("services.market_service._load_regional_supply_index", fake_load_regional_supply_index)
-    monkeypatch.setattr("services.market_service._save_alert_history", no_alert_history)
-    monkeypatch.setattr(
-        "services.market_service.predict_dynamic_threshold",
-        lambda **kwargs: {
-            "predicted_threshold_kg": 700,
-            "model": "test demand model",
-            "season": "kharif",
-        },
-    )
-
-    result = await analyze_demand("hyderabad", "rice")
-    rice = result["crop_analysis"]["rice"]
-
-    assert rice["current_supply_kg"] == 1400
-    assert rice["expected_demand_kg"] == 700
-    assert rice["supply_demand_ratio"] == 2
-    assert rice["market_status"] == "oversupply"
-    assert rice["redistribution_options"][0]["region"] == "Warangal"
-    assert rice["price_impact"]["price_drop_pct"] > 0
 
 
 @pytest.mark.asyncio
@@ -159,38 +110,6 @@ async def test_all_regional_supply_aggregates_listings_by_region_and_crop(monkey
     assert regional_supply["chengalpattu"]["rice"]["total_quantity_kg"] == 900
     assert regional_supply["chengalpattu"]["rice"]["listings_count"] == 1
 
-
-@pytest.mark.asyncio
-async def test_demand_analysis_recommends_sourcing_from_oversupplied_region(monkeypatch):
-    async def fake_load_regional_supply_index(query=None):
-        return {
-            "chennai": {"groundnut": 310},
-            "kanchipuram": {"groundnut": 1200},
-        }
-
-    async def no_alert_history(signals):
-        return None
-
-    def demand_estimate(**kwargs):
-        expected_demand = 895 if kwargs["population_density"] > 20000 else 500
-        return {
-            "predicted_threshold_kg": expected_demand,
-            "model": "test demand model",
-            "season": "kharif",
-        }
-
-    monkeypatch.setattr("services.market_service._load_regional_supply_index", fake_load_regional_supply_index)
-    monkeypatch.setattr("services.market_service._save_alert_history", no_alert_history)
-    monkeypatch.setattr("services.market_service.predict_dynamic_threshold", demand_estimate)
-
-    result = await analyze_demand("Chennai", "groundnut")
-    groundnut = result["crop_analysis"]["groundnut"]
-
-    assert groundnut["current_supply_kg"] == 310
-    assert groundnut["expected_demand_kg"] == 895
-    assert groundnut["market_status"] == "undersupply"
-    assert groundnut["redistribution_options"][0]["region"] == "Kanchipuram"
-    assert groundnut["redistribution_options"][0]["suggested_quantity_kg"] == 585
 
 
 @pytest.mark.asyncio

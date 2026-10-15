@@ -5,6 +5,10 @@ backend/.env
 backend/mongodb.env.txt
 backend/data/local_users.json
 backend/data/local_market_listings.json
+# Mandi price store (SQLite fallback), scheduler lock and saved forecast models: local runtime data
+backend/data/mandi.sqlite3*
+backend/data/scheduler.lock
+backend/data/models/
 
 # Python environment and build artifacts
 venv/

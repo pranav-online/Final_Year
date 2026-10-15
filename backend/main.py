@@ -1,3 +1,12 @@
+import sys
+
+# Services print emoji while loading models. When output goes to a file or pipe on
+# Windows (cp1252), that raised UnicodeEncodeError and crashed the API at import;
+# replace unprintable characters instead. Must run before the route imports.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from routes.auth import router as auth_router
@@ -6,14 +15,28 @@ from routes.weather import router as weather_router
 from routes.crop import router as crop_router
 from routes.market import router as market_router
 from routes.notifications import router as notifications_router
-from routes.region_routes import router as region_router    
+from routes.region_routes import router as region_router
+from routes.mandi_routes import router as mandi_router
+from routes.decision_routes import router as decision_router
+from services.mandi.scheduler import start_scheduler, shutdown_scheduler
 from config.database import ping_database
 from pymongo.errors import PyMongoError
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Daily mandi ingestion; set SCHEDULER_ENABLED=0 on all but one worker.
+    start_scheduler()
+    yield
+    shutdown_scheduler()
+
 
 app = FastAPI(
     title="ALIP - AgriLink Intelligence Platform",
     description="AI-Based Agricultural Decision Support System",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -29,6 +52,10 @@ app.include_router(auth_router)
 app.include_router(disease_router)
 app.include_router(weather_router)
 app.include_router(crop_router)
+# Before market_router: its /market/demand/{region} would otherwise capture
+# fixed paths like /market/demand/overview.
+app.include_router(mandi_router)
+app.include_router(decision_router)
 app.include_router(market_router)
 app.include_router(notifications_router)
 app.include_router(region_router, prefix="/market",

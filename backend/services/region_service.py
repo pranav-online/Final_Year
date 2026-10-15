@@ -35,6 +35,37 @@ REGIONS = {
     "Mumbai":      {"lat": 19.0760, "lng": 72.8777, "state": "Maharashtra",     "population_density": 20667, "region_type": "urban",      "primary_crops": ["rice","vegetables","mango"],     "market_size": "large"},
     "Patna":       {"lat": 25.5941, "lng": 85.1376, "state": "Bihar",           "population_density": 1800,  "region_type": "urban",      "primary_crops": ["rice","wheat","maize"],          "market_size": "medium"},
     "Lucknow":     {"lat": 26.8467, "lng": 80.9462, "state": "Uttar Pradesh",   "population_density": 6900,  "region_type": "urban",      "primary_crops": ["wheat","rice","sugarcane"],      "market_size": "large"},
+    # Merged from the former demand_analysis.REGION_COORDINATES table (plus Delhi).
+    # population_density is left out where no sourced figure was available;
+    # callers fall back to a neutral default.
+    "Delhi":              {"lat": 28.6139, "lng": 77.2090, "state": "Delhi",          "region_type": "urban",      "primary_crops": [], "market_size": "large"},
+    "Visakhapatnam":      {"lat": 17.6868, "lng": 83.2185, "state": "Andhra Pradesh", "region_type": "urban",      "primary_crops": [], "market_size": "large"},
+    "Madurai":            {"lat": 9.9252,  "lng": 78.1198, "state": "Tamil Nadu",     "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Mysore":             {"lat": 12.2958, "lng": 76.6394, "state": "Karnataka",      "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Amritsar":           {"lat": 31.6340, "lng": 74.8723, "state": "Punjab",         "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Varanasi":           {"lat": 25.3176, "lng": 82.9739, "state": "Uttar Pradesh",  "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Kochi":              {"lat": 9.9312,  "lng": 76.2673, "state": "Kerala",         "region_type": "urban",      "primary_crops": [], "market_size": "large"},
+    "Thiruvananthapuram": {"lat": 8.5241,  "lng": 76.9366, "state": "Kerala",         "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Jodhpur":            {"lat": 26.2389, "lng": 73.0243, "state": "Rajasthan",      "region_type": "urban",      "primary_crops": [], "market_size": "medium"},
+    "Surat":              {"lat": 21.1702, "lng": 72.8311, "state": "Gujarat",        "region_type": "urban",      "primary_crops": [], "market_size": "large"},
+}
+
+# State name -> representative market, used when a listing gives a state
+# instead of a city.
+STATE_TO_REFERENCE_REGION = {
+    "telangana": "hyderabad",
+    "andhra pradesh": "vijayawada",
+    "tamil nadu": "chennai",
+    "karnataka": "bangalore",
+    "maharashtra": "pune",
+    "punjab": "ludhiana",
+    "uttar pradesh": "lucknow",
+    "kerala": "kochi",
+    "rajasthan": "jaipur",
+    "west bengal": "kolkata",
+    "gujarat": "ahmedabad",
+    "madhya pradesh": "bhopal",
+    "delhi": "delhi",
 }
 
 # ─── Haversine Distance Formula ────────────────────────
@@ -60,7 +91,7 @@ def _demand_score(region_data: Dict, crop: str) -> float:
     score = 0.0
 
     # Population density — reduced weights
-    pd = region_data["population_density"]
+    pd = region_data.get("population_density", 0)
     if pd > 10000:   score += 1.5   # was 3.0
     elif pd > 5000:  score += 1.0   # was 2.0
     elif pd > 2000:  score += 0.5   # was 1.0
@@ -72,7 +103,7 @@ def _demand_score(region_data: Dict, crop: str) -> float:
 
     # Crop penalty — if they grow it locally
     if crop.lower() in [c.lower()
-                        for c in region_data["primary_crops"]]:
+                        for c in region_data.get("primary_crops", [])]:
         score -= 0.5
 
     # Region type bonus — reduced
@@ -99,33 +130,6 @@ def _suitability(distance_km: float,
         return "Possible"
 
 # ─── Public API ────────────────────────────────────────
-def get_nearest_regions(source_region: str, crop: str,
-                         n: int = 5,
-                         max_distance_km: float = 500.0) -> List[Dict]:
-    """Find nearest regions to receive redistributed supply."""
-    if source_region not in REGIONS:
-        return []
-    src = REGIONS[source_region]
-    nearby = []
-    for name, data in REGIONS.items():
-        if name == source_region:
-            continue
-        dist = haversine_distance(src["lat"], src["lng"],
-                                   data["lat"], data["lng"])
-        if dist <= max_distance_km:
-            ds = _demand_score(data, crop)
-            nearby.append({
-                "region":       name,
-                "state":        data["state"],
-                "distance_km":  dist,
-                "region_type":  data["region_type"],
-                "market_size":  data["market_size"],
-                "demand_score": round(ds, 2),
-                "suitability":  _suitability(dist, ds)
-            })
-    nearby.sort(key=lambda x: x["distance_km"] / (x["demand_score"] + 1))
-    return nearby[:n]
-
 def get_all_regions() -> List[str]:
     return list(REGIONS.keys())
 
@@ -151,6 +155,16 @@ def get_distance_between(r1: str, r2: str) -> float:
         a["lat"], a["lng"],
         b["lat"], b["lng"]
     )
+
+def get_coordinates(region: str):
+    """(lat, lng) for a region or state name, or None if unknown."""
+    key = _find_region(region or "")
+    if not key:
+        ref = STATE_TO_REFERENCE_REGION.get((region or "").strip().lower())
+        key = _find_region(ref) if ref else None
+    if not key:
+        return None
+    return REGIONS[key]["lat"], REGIONS[key]["lng"]
 
 def get_region_info(region: str) -> Dict:
     """Get full information for a region."""
